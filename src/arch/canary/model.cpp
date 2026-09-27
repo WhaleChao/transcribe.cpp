@@ -22,6 +22,7 @@
 #include "transcribe-log.h"
 #include "transcribe-mel.h"
 #include "transcribe-meta.h"
+#include "transcribe-prompting.h"
 #include "transcribe-repetition-guard.h"
 #include "weights.h"
 
@@ -383,6 +384,11 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
     if (const transcribe_status st = read_canary_hparams(loader.gguf(), m->hparams); st != TRANSCRIBE_OK) {
         return st;
     }
+    // Transcript prefix: canary2's user_prefix (measured clean on all three
+    // canary2 checkpoints). Needs a sub-vocab range for aggregate tokenizers.
+    transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX,
+                            m->hparams.prompt_format == "canary2" &&
+                                (m->hparams.tokenizer_single_sp || !m->hparams.tok_lang_codes.empty()));
 
     // Publish the input-length ceiling now that the encoder positional span
     // and frontend rate are known (apply_family_invariants ran before the
@@ -598,11 +604,14 @@ std::vector<int32_t> build_prompt_canary2(const CanaryModel &   cm,
                                           int                   src_lang_id,
                                           int                   tgt_lang_id,
                                           const char * /*task*/,
-                                          bool pnc) {
+                                          bool                         pnc,
+                                          const std::vector<int32_t> & prefix_ids) {
     // canary2 prompt template:
     //   <|startofcontext|> [decodercontext] <|startoftranscript|>
     //   <|emo:?|> <|src_lang|> <|tgt_lang|> <|pnc|> <|itn|> <|timestamp|> <|diarize|>
-    // ASR with empty decoder context realizes 9 tokens.
+    //   [user_prefix]
+    // ASR with empty decoder context realizes 9 tokens. `prefix_ids` (the
+    // transcript prefix, NeMo's user_prefix turn) follows the last slot.
     std::vector<int32_t> ids;
     ids.reserve(9);
 
@@ -654,8 +663,45 @@ std::vector<int32_t> build_prompt_canary2(const CanaryModel &   cm,
         return {};
     }
     ids.push_back(hp.nodiarize_id);
+    ids.insert(ids.end(), prefix_ids.begin(), prefix_ids.end());
 
     return ids;
+}
+
+// Transcript prefix ids for canary2: NeMo tokenizes the user_prefix turn on
+// its own with the target language's SentencePiece (BPE) tokenizer, so it
+// carries the dummy-prefix space. Aggregate tokenizers encode within that language's
+// sub-vocab; single-SP (canary-1b-v2) over the whole vocab.
+transcribe_status encode_canary2_prefix(const CanaryModel &    cm,
+                                        const char *           prefix,
+                                        const char *           tgt_lang,
+                                        std::vector<int32_t> & out) {
+    out.clear();
+    if (prefix == nullptr || prefix[0] == '\0') {
+        return TRANSCRIBE_OK;
+    }
+    if (const transcribe_status st = transcribe::prompting::check_plain_text(cm.tok, prefix, "prefix");
+        st != TRANSCRIBE_OK) {
+        return st;
+    }
+    int lo = 0, hi = -1;
+    if (!cm.hparams.tokenizer_single_sp) {
+        lo = hi = -1;
+        for (size_t i = 0; i < cm.hparams.tok_lang_codes.size(); ++i) {
+            if (cm.hparams.tok_lang_codes[i] == tgt_lang) {
+                lo = cm.hparams.tok_lang_offsets[i];
+                hi = lo + cm.hparams.tok_lang_sizes[i];
+            }
+        }
+        if (lo < 0) {
+            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "canary run: no tokenizer for prefix language '%s'", tgt_lang);
+            return TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE;
+        }
+    }
+    // canary-1b-v2's normalizer keeps extra whitespace; the flash models'
+    // per-language tokenizers collapse it (their SentencePiece model specs).
+    return cm.tok.encode_sentencepiece_bpe(prefix, out, lo, hi,
+                                           /*remove_extra_whitespaces=*/!cm.hparams.tokenizer_single_sp);
 }
 
 int find_language_id(const CanaryHParams & hp, const char * lang) {
@@ -921,8 +967,14 @@ transcribe_status run(transcribe_session *          session,
     }
 
     std::vector<int32_t> prompt_ids;
+    std::vector<int32_t> prefix_ids;
     if (cm->hparams.prompt_format == "canary2") {
-        prompt_ids = build_prompt_canary2(*cm, cm->hparams, src_id, tgt_id, task, pnc);
+        if (const transcribe_status st =
+                encode_canary2_prefix(*cm, params != nullptr ? params->prefix : nullptr, tgt_lang, prefix_ids);
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+        prompt_ids = build_prompt_canary2(*cm, cm->hparams, src_id, tgt_id, task, pnc, prefix_ids);
     } else if (cm->hparams.prompt_format == "canary") {
         prompt_ids = build_prompt_canary(cm->hparams, src_id, tgt_id, task, pnc);
     }
@@ -932,6 +984,7 @@ transcribe_status run(transcribe_session *          session,
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
     const int prompt_len = static_cast<int>(prompt_ids.size());
+    transcribe::prompting::dump_rendered(cm->tok, prompt_ids, -1, "canary");
 
     // Init KV cache.
     {
@@ -1179,8 +1232,11 @@ transcribe_status run(transcribe_session *          session,
             seg.text        = full;
 
             cc->segments.push_back(std::move(seg));
-            cc->raw_text =
-                tok.decode(generated_ids.data(), static_cast<int>(generated_ids.size()));  // unfiltered decode
+            // Unfiltered decode, led by the transcript prefix when one was
+            // forced (full_text / segments hold only the continuation).
+            std::vector<int32_t> raw_ids = prefix_ids;
+            raw_ids.insert(raw_ids.end(), generated_ids.begin(), generated_ids.end());
+            cc->raw_text    = tok.decode(raw_ids.data(), static_cast<int>(raw_ids.size()));
             cc->full_text   = std::move(full);
             cc->result_kind = TRANSCRIBE_TIMESTAMPS_NONE;
             cc->has_result  = true;
@@ -1555,7 +1611,7 @@ transcribe_status run_batch(transcribe_session *          session,
     }
     std::vector<int32_t> prompt_ids;
     if (hp.prompt_format == "canary2") {
-        prompt_ids = build_prompt_canary2(*cm, hp, src_id, tgt_id, task, pnc);
+        prompt_ids = build_prompt_canary2(*cm, hp, src_id, tgt_id, task, pnc, {});
     } else if (hp.prompt_format == "canary") {
         prompt_ids = build_prompt_canary(hp, src_id, tgt_id, task, pnc);
     }
