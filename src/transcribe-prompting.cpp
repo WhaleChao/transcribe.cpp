@@ -58,8 +58,10 @@ transcribe_status check_plain_text(const Tokenizer & tok, const std::string & te
         }
         const bool pipe_form = piece.size() >= 4 && piece[1] == '|' && piece[piece.size() - 2] == '|';
         if (pipe_form || tok.is_control(id) || id == tok.bos_id() || id == tok.eos_id()) {
-            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "%s contains the control token \"%s\" (id %d); control tokens are "
-                    "not accepted in prompting text", what, piece.c_str(), id);
+            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                    "%s contains the control token \"%s\" (id %d); control tokens are "
+                    "not accepted in prompting text",
+                    what, piece.c_str(), id);
             return TRANSCRIBE_ERR_INVALID_ARG;
         }
     }
