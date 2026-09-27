@@ -26,6 +26,7 @@
 #include "transcribe-log.h"
 #include "transcribe-mel.h"
 #include "transcribe-meta.h"
+#include "transcribe-prompting.h"
 #include "transcribe-repetition-guard.h"
 #include "voxtral.h"
 #include "weights.h"
@@ -325,6 +326,25 @@ transcribe_status build_transcription_prompt(const VoxtralModel &   m,
     return TRANSCRIBE_OK;
 }
 
+// Instruct-template text for the run, if any: TRANSLATE synthesizes
+// "Translate this to {Language}."; TRANSCRIBE_TASK_INSTRUCT sends the caller's
+// prompt verbatim (the mistral-common chat path: audio, then the text, with
+// no [TRANSCRIBE] token). Returns false for plain transcription.
+bool instruct_instruction(const transcribe_run_params * params, std::string & instruction) {
+    if (params == nullptr) {
+        return false;
+    }
+    if (params->task == TRANSCRIBE_TASK_TRANSLATE) {
+        instruction = std::string("Translate this to ") + lang_name_for(params->target_language) + ".";
+        return true;
+    }
+    if (params->task == TRANSCRIBE_TASK_INSTRUCT && params->prompt != nullptr) {
+        instruction = params->prompt;
+        return true;
+    }
+    return false;
+}
+
 // Build the instruct prompt: audio + BPE(instruction) + [/INST].
 transcribe_status build_instruct_prompt(const VoxtralModel &   m,
                                         const std::string &    instruction,
@@ -342,7 +362,8 @@ transcribe_status build_instruct_prompt(const VoxtralModel &   m,
         out_ids.push_back(m.hparams.audio_token_id);
     }
     std::vector<int32_t> instr_ids;
-    if (const transcribe_status st = m.tok.encode(instruction, instr_ids); st != TRANSCRIBE_OK) {
+    if (const transcribe_status st = transcribe::prompting::encode_plain(m.tok, instruction, instr_ids, "prompt");
+        st != TRANSCRIBE_OK) {
         log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "voxtral: failed to encode instruction text");
         return st;
     }
@@ -588,12 +609,8 @@ transcribe_status run(transcribe_session *          session,
     transcribe::debug::init();
 
     // ----- Prompt mode -----
-    const bool  translate = (params != nullptr && params->task == TRANSCRIBE_TASK_TRANSLATE);
     std::string instruction;
-    if (translate) {
-        const char * tgt = (params != nullptr) ? params->target_language : nullptr;
-        instruction      = std::string("Translate this to ") + lang_name_for(tgt) + ".";
-    }
+    const bool  translate = instruct_instruction(params, instruction);
 
     if (!cm->mel.has_value()) {
         log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "voxtral run: model has no MelFrontend");
@@ -747,6 +764,7 @@ transcribe_status run(transcribe_session *          session,
         }
     }
     const int T_prompt = static_cast<int>(prompt_ids.size());
+    transcribe::prompting::dump_rendered(cm->tok, prompt_ids, cm->hparams.audio_token_id, "voxtral");
 
     // ----- Input-length gate (see docs/input-limits.md) -----
     // Auto-size the KV cache to this utterance (grow to fit, capped at the
@@ -1104,13 +1122,9 @@ transcribe_status run_batch(transcribe_session *          session,
     }
 
     // ----- Prompt mode (uniform across the batch) -----
-    const bool  translate = (params != nullptr && params->task == TRANSCRIBE_TASK_TRANSLATE);
-    std::string instruction;
-    if (translate) {
-        const char * tgt = (params != nullptr) ? params->target_language : nullptr;
-        instruction      = std::string("Translate this to ") + lang_name_for(tgt) + ".";
-    }
-    const char * lang = (params != nullptr) ? params->language : nullptr;
+    std::string  instruction;
+    const bool   translate = instruct_instruction(params, instruction);
+    const char * lang      = (params != nullptr) ? params->language : nullptr;
 
     // ----- Chunk geometry -----
     int samples_per_chunk = hp.fe_n_samples;

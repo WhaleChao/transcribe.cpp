@@ -25,6 +25,10 @@ void apply_family_invariants(transcribe_model & model) {
     // Per-run cancellation. No INITIAL_PROMPT: Voxtral has no run extension
     // that accepts a prompt.
     transcribe::set_feature(&model, TRANSCRIBE_FEATURE_CANCELLATION, true);
+    // TRANSCRIBE_TASK_INSTRUCT: the caller's prompt through the same chat
+    // path as translation. Both 2507 sizes follow free-text instructions
+    // (prompting A/B, notes/prompting-ab-results.md).
+    transcribe::set_feature(&model, TRANSCRIBE_FEATURE_INSTRUCT, true);
 }
 
 }  // namespace transcribe::voxtral
