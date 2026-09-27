@@ -1084,7 +1084,8 @@ transcribe_status run(transcribe_session *          ctx_base,
     const int            n_audio_tokens = cc->n_audio_tokens;
     const int            ceiling        = granite_context_ceiling(cc->n_ctx, cm->hparams);
     if (const transcribe_status st = build_granite_affixes(
-            cm, params, ceiling - k_gen_reserve - n_audio_tokens - k_prompt_overhead_tokens, prefix_ids, suffix_ids);
+            cm, params, std::max(ceiling - k_gen_reserve - n_audio_tokens - k_prompt_overhead_tokens, 0), prefix_ids,
+            suffix_ids);
         st != TRANSCRIBE_OK) {
         return st;
     }
@@ -1561,7 +1562,20 @@ transcribe_status run_batch_serial(GraniteSession *              cc,
 // and cannot be composed. Validate the mode-dependent timestamp contract before
 // the dispatcher clears the previous result snapshot.
 transcribe_status run_validate(const transcribe_session * ctx, const transcribe_run_params * params) {
-    if (ctx == nullptr || ctx->model == nullptr || params == nullptr || !diarize_requested(ctx->model, params)) {
+    if (ctx == nullptr || ctx->model == nullptr || params == nullptr) {
+        return TRANSCRIBE_OK;
+    }
+    // A transcript prefix only composes with plain transcription (see
+    // build_granite_affixes); reject the untested task combinations here,
+    // before the previous result is cleared.
+    if (params->prefix != nullptr &&
+        (params->timestamps == TRANSCRIBE_TIMESTAMPS_WORD || diarize_requested(ctx->model, params))) {
+        log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                "granite: a transcript prefix is supported in plain transcription only "
+                "(not word timestamps or speaker attribution)");
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    if (!diarize_requested(ctx->model, params)) {
         return TRANSCRIBE_OK;
     }
     if (params->task != TRANSCRIBE_TASK_TRANSCRIBE) {
@@ -1598,9 +1612,9 @@ transcribe_status run_batch(transcribe_session *          session,
     // budget ignores audio here; a clip that then does not fit is that row's
     // INPUT_TOO_LONG, as without a vocabulary.
     std::vector<int32_t> prefix_ids, suffix_ids;
-    if (build_granite_affixes(cm, params,
-                              granite_context_ceiling(cc->n_ctx, hp) - k_gen_reserve - k_prompt_overhead_tokens,
-                              prefix_ids, suffix_ids) != TRANSCRIBE_OK) {
+    if (build_granite_affixes(
+            cm, params, std::max(granite_context_ceiling(cc->n_ctx, hp) - k_gen_reserve - k_prompt_overhead_tokens, 0),
+            prefix_ids, suffix_ids) != TRANSCRIBE_OK) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
     const int prefix_len = static_cast<int>(prefix_ids.size());

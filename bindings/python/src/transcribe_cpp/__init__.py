@@ -682,6 +682,8 @@ def _build_run_params(task, language, target_language, timestamps,
     if vocabulary is not None:
         if isinstance(vocabulary, (str, bytes)):
             raise InvalidArgument("vocabulary must be a sequence of terms, not a single string")
+        if not all(isinstance(t, str) for t in vocabulary):
+            raise InvalidArgument("vocabulary terms must be strings")
         terms = [t.encode("utf-8") for t in vocabulary]
         if terms:
             arr = (ctypes.c_char_p * len(terms))(*terms)

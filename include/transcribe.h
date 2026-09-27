@@ -1183,9 +1183,10 @@ struct transcribe_run_params {
      *   contain the prefix's speech. full_text, segments and words hold only
      *   the continuation, and timestamps start after the prefix; raw_text
      *   holds prefix + continuation. For long-form families it applies to
-     *   the first window only. Under timestamps AUTO a family may resolve
-     *   to NONE when its timestamps do not compose with a prefix (Whisper
-     *   does). Unlike the soft inputs above, a non-empty
+     *   the first window only. When a family's timestamps do not compose
+     *   with a prefix, timestamps AUTO resolves to NONE and an explicit
+     *   granularity is TRANSCRIBE_ERR_INVALID_ARG (Whisper). Unlike the soft
+     *   inputs above, a non-empty
      *   prefix is an error when unsupported (TRANSCRIBE_ERR_INVALID_ARG):
      *   ignoring it would silently repeat the prefix's words. It is also
      *   rejected under INSTRUCT, by transcribe_run_batch (one shared params

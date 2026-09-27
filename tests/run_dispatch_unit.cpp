@@ -654,7 +654,8 @@ transcribe_status prompt_run(transcribe_model & model, const transcribe_run_para
     float                   pcm = 0.0f;
     const transcribe_status st  = transcribe_run(&session, &pcm, 1, &params);
     if (st != TRANSCRIBE_OK) {
-        // Every prompting rejection is pre-clear.
+        // Every dispatcher-level prompting rejection is pre-clear (family
+        // text checks go through check_prompting_text / run_validate).
         CHECK(session.has_result);
         CHECK(session.full_text == "previous result");
     }

@@ -1395,7 +1395,7 @@ transcribe_status whisper_run(transcribe_session *          session,
     // AUTO resolves to NONE under a transcript prefix: the timestamp rules
     // restart after the prefix and force an initial timestamp near 0 s while
     // the prefix's speech is still playing, which derails the continuation.
-    // An explicit SEGMENT request keeps openai's prefix + timestamps behavior.
+    // An explicit SEGMENT request with a prefix is rejected in run_validate.
     const bool has_prefix              = params != nullptr && transcribe::prompting::has_text(params->prefix);
     const bool want_segment_timestamps = (requested_timestamps == TRANSCRIBE_TIMESTAMPS_AUTO && !has_prefix) ||
                                          requested_timestamps == TRANSCRIBE_TIMESTAMPS_SEGMENT;
@@ -3509,12 +3509,31 @@ static bool whisper_accepts_ext_kind(const transcribe_model * model, transcribe_
 // the snapshot is cleared — an accepted gap, since run() is one-shot with no
 // accumulating transcript to protect.
 static transcribe_status whisper_run_validate(const transcribe_session * ctx, const transcribe_run_params * params) {
-    (void) ctx;
     if (const transcribe_status st =
             transcribe_ext_check(params != nullptr ? params->family : nullptr, TRANSCRIBE_EXT_KIND_WHISPER_RUN,
                                  sizeof(struct transcribe_whisper_run_ext));
         st != TRANSCRIBE_OK) {
         return st;
+    }
+    // Transcript prefix: with explicit SEGMENT timestamps the timestamp rules
+    // restart after the prefix and force an initial timestamp while the
+    // prefix's speech is still playing, which in practice ends the decode
+    // (AUTO resolves to NONE instead; see whisper_run). And like openai, the
+    // prefix may take at most half the decoder window.
+    if (params != nullptr && transcribe::prompting::has_text(params->prefix)) {
+        if (params->timestamps == TRANSCRIBE_TIMESTAMPS_SEGMENT) {
+            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                    "whisper run: a transcript prefix does not compose with segment timestamps; use NONE or AUTO");
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+        const auto *         cm = static_cast<const WhisperModel *>(ctx->model);
+        std::vector<int32_t> ids;
+        if (cm != nullptr && cm->tok.encode(std::string(" ") + params->prefix, ids) == TRANSCRIBE_OK &&
+            static_cast<int>(ids.size()) > cm->hparams.dec_max_target_positions / 2 - 1) {
+            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "whisper run: transcript prefix is %zu tokens; the limit is %d",
+                    ids.size(), cm->hparams.dec_max_target_positions / 2 - 1);
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
     }
     // The generic prompting fields and the extension's own prompt fill the
     // same <|startofprev|> slot; there is no documented way to merge them.

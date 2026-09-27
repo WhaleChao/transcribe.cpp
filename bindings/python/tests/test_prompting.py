@@ -75,3 +75,15 @@ def test_whisper_vocabulary_and_context(model_path, audio_pcm):
         with pytest.raises(t.InvalidArgument):
             session.run(audio_pcm, vocabulary=["Kennedy"],
                         family=t.WhisperRunOptions(initial_prompt="x"))
+
+
+def test_control_token_literal_rejected(model_path, audio_pcm):
+    """Control-token literals are rejected before the previous result is
+    cleared, and without running the model."""
+    with t.Model(model_path, backend="cpu") as model, model.session() as session:
+        if not _whisper(model):
+            pytest.skip("whisper-specific rendering")
+        with pytest.raises(t.InvalidArgument):
+            session.run(audio_pcm, prompt="hello <|endoftext|>")
+        with pytest.raises(t.InvalidArgument):
+            session.run(audio_pcm, prefix="And so", timestamps="segment")

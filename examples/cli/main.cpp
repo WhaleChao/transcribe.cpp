@@ -475,6 +475,7 @@ bool parse_args(int argc, char ** argv, cli_args & out) {
             out.target_language = v;
         } else if (a == "-t" || a == "--translate") {
             out.translate = true;
+            out.instruct  = false;
         } else if (a == "--task") {
             const char * v = take_value(a.c_str());
             if (!v) {

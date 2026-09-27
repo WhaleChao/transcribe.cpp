@@ -453,6 +453,34 @@ transcribe_status validate_prompting(const transcribe_model * model, const trans
     return TRANSCRIBE_OK;
 }
 
+// Control-token literals in the prompting text a family will act on, checked
+// with the model's tokenizer before the result snapshot is cleared (the
+// family re-checks when it encodes). Runs after strip_ignored_prompting, so
+// ignored inputs are not rejected.
+transcribe_status check_prompting_text(const transcribe_model * model, const transcribe_run_params * params) {
+    const transcribe::Tokenizer * tok = model->tokenizer();
+    if (tok == nullptr) {
+        return TRANSCRIBE_OK;
+    }
+    for (int32_t i = 0; i < params->n_vocabulary; ++i) {
+        if (const transcribe_status st =
+                transcribe::prompting::check_plain_text(*tok, params->vocabulary[i], "vocabulary");
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+    }
+    if (params->prompt != nullptr) {
+        if (const transcribe_status st = transcribe::prompting::check_plain_text(*tok, params->prompt, "prompt");
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+    }
+    if (params->prefix != nullptr) {
+        return transcribe::prompting::check_plain_text(*tok, params->prefix, "prefix");
+    }
+    return TRANSCRIBE_OK;
+}
+
 // Full-size copy of a caller's run params: defaults first, then only the
 // prefix the caller's struct_size covers, so every trailing field is
 // readable (NULL/0 for an older caller). struct_size is preserved so
@@ -1921,6 +1949,9 @@ static transcribe_status transcribe_stream_begin_impl(struct transcribe_session 
     // contract is undisturbed.
     warn_unsupported_advisory(session->model, run_params);
     strip_ignored_prompting(session->model, &run_params_view);
+    if (const transcribe_status st = check_prompting_text(session->model, run_params); st != TRANSCRIBE_OK) {
+        return st;
+    }
 
     // Optional family preflight: validates extension field values
     // (e.g. parakeet's (L, C, R) menu) without mutating state. On
@@ -2303,6 +2334,9 @@ static transcribe_status run_one_inner(struct transcribe_session *          sess
             return TRANSCRIBE_ERR_UNSUPPORTED_TASK;
         }
         strip_ignored_prompting(session->model, &params_view);
+        if (const transcribe_status st = check_prompting_text(session->model, params); st != TRANSCRIBE_OK) {
+            return st;
+        }
 
         // Family run-ext validation (the _RUN analogue of stream_validate),
         // the final pre-clear gate. Runs AFTER the run-param checks above,
@@ -2480,6 +2514,9 @@ static transcribe_status transcribe_run_batch_impl(struct transcribe_session *  
             return TRANSCRIBE_ERR_UNSUPPORTED_TASK;
         }
         strip_ignored_prompting(session->model, &params_view);
+        if (const transcribe_status st = check_prompting_text(session->model, params); st != TRANSCRIBE_OK) {
+            return st;
+        }
         if (session->model->arch != nullptr && session->model->arch->run_validate != nullptr) {
             if (const transcribe_status st = session->model->arch->run_validate(session, params); st != TRANSCRIBE_OK) {
                 return st;

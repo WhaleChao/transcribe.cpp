@@ -142,22 +142,25 @@ transcribe_status resolve_chat_tokens(const transcribe::Tokenizer & tok, ChatTok
     return TRANSCRIBE_OK;
 }
 
+// get_prompt's hotword block up to the list:
+// 请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。
+// \n\n\n**上下文信息：**\n\n\n热词列表：[
+constexpr const char k_hotword_preamble[] =
+    "\xE8\xAF\xB7\xE7\xBB\x93\xE5\x90\x88\xE4\xB8\x8A\xE4\xB8\x8B\xE6\x96\x87\xE4\xBF\xA1\xE6\x81\xAF"
+    "\xEF\xBC\x8C\xE6\x9B\xB4\xE5\x8A\xA0\xE5\x87\x86\xE7\xA1\xAE\xE5\x9C\xB0\xE5\xAE\x8C\xE6\x88\x90"
+    "\xE8\xAF\xAD\xE9\x9F\xB3\xE8\xBD\xAC\xE5\x86\x99\xE4\xBB\xBB\xE5\x8A\xA1\xE3\x80\x82\xE5\xA6\x82"
+    "\xE6\x9E\x9C\xE6\xB2\xA1\xE6\x9C\x89\xE7\x9B\xB8\xE5\x85\xB3\xE4\xBF\xA1\xE6\x81\xAF\xEF\xBC\x8C"
+    "\xE6\x88\x91\xE4\xBB\xAC\xE4\xBC\x9A\xE7\x95\x99\xE7\xA9\xBA\xE3\x80\x82"
+    "\n\n\n**\xE4\xB8\x8A\xE4\xB8\x8B\xE6\x96\x87\xE4\xBF\xA1\xE6\x81\xAF\xEF\xBC\x9A**\n\n\n"
+    "\xE7\x83\xAD\xE8\xAF\x8D\xE5\x88\x97\xE8\xA1\xA8\xEF\xBC\x9A[";
+
 // Build the prompt text the reference's FunASRNano.get_prompt produces,
 // byte for byte: an optional hotword block (the generic vocabulary, ", "-
 // joined), then the language / itn transcription instruction.
 std::string build_funasr_prompt_text(const std::vector<std::string> & hotwords, const char * lang, bool use_itn) {
     std::string out;
     if (!hotwords.empty()) {
-        // 请结合上下文信息，更加准确地完成语音转写任务。如果没有相关信息，我们会留空。
-        // \n\n\n**上下文信息：**\n\n\n热词列表：[{hotwords}]\n
-        out =
-            "\xE8\xAF\xB7\xE7\xBB\x93\xE5\x90\x88\xE4\xB8\x8A\xE4\xB8\x8B\xE6\x96\x87\xE4\xBF\xA1\xE6\x81\xAF"
-            "\xEF\xBC\x8C\xE6\x9B\xB4\xE5\x8A\xA0\xE5\x87\x86\xE7\xA1\xAE\xE5\x9C\xB0\xE5\xAE\x8C\xE6\x88\x90"
-            "\xE8\xAF\xAD\xE9\x9F\xB3\xE8\xBD\xAC\xE5\x86\x99\xE4\xBB\xBB\xE5\x8A\xA1\xE3\x80\x82\xE5\xA6\x82"
-            "\xE6\x9E\x9C\xE6\xB2\xA1\xE6\x9C\x89\xE7\x9B\xB8\xE5\x85\xB3\xE4\xBF\xA1\xE6\x81\xAF\xEF\xBC\x8C"
-            "\xE6\x88\x91\xE4\xBB\xAC\xE4\xBC\x9A\xE7\x95\x99\xE7\xA9\xBA\xE3\x80\x82"
-            "\n\n\n**\xE4\xB8\x8A\xE4\xB8\x8B\xE6\x96\x87\xE4\xBF\xA1\xE6\x81\xAF\xEF\xBC\x9A**\n\n\n"
-            "\xE7\x83\xAD\xE8\xAF\x8D\xE5\x88\x97\xE8\xA1\xA8\xEF\xBC\x9A[";
+        out = k_hotword_preamble;
         out += transcribe::prompting::join(hotwords, ", ");
         out += "]\n";
     }
@@ -680,8 +683,10 @@ transcribe_status run(transcribe_session *          session,
     if (!hotwords.empty()) {
         transcribe::prompting::FittedPrompt fit;
         if (const transcribe_status st = transcribe::prompting::fit_terms_and_context(
-                cm->tok, hotwords, { "[", ", ", "]" }, "",
-                funasr_nano_context_ceiling(cc->n_ctx, hp) - k_gen_reserve - fake_token_len - k_prompt_overhead_tokens,
+                cm->tok, hotwords, { k_hotword_preamble, ", ", "]\n" }, "",
+                std::max(funasr_nano_context_ceiling(cc->n_ctx, hp) - k_gen_reserve - fake_token_len -
+                             k_prompt_overhead_tokens,
+                         0),
                 "funasr_nano run", fit);
             st != TRANSCRIBE_OK) {
             return st;
@@ -1149,9 +1154,10 @@ transcribe_status run_batch(transcribe_session *          session,
     std::vector<std::string> hotwords = transcribe::prompting::terms(params);
     if (!hotwords.empty()) {
         transcribe::prompting::FittedPrompt fit;
-        if (transcribe::prompting::fit_terms_and_context(cm->tok, hotwords, { "[", ", ", "]" }, "",
-                                                         ceiling - k_gen_reserve - k_prompt_overhead_tokens,
-                                                         "funasr_nano run_batch", fit) != TRANSCRIBE_OK) {
+        if (transcribe::prompting::fit_terms_and_context(
+                cm->tok, hotwords, { k_hotword_preamble, ", ", "]\n" }, "",
+                std::max(ceiling - k_gen_reserve - k_prompt_overhead_tokens, 0), "funasr_nano run_batch",
+                fit) != TRANSCRIBE_OK) {
             return run_batch_serial(cc, pcm, n_samples, n, params);
         }
         hotwords.resize(fit.n_terms);
