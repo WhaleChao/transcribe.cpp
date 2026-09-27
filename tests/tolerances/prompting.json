@@ -216,7 +216,7 @@
             5.3
           ]
         },
-        "base_timestamps_auto": {
+        "base_word_timestamps": {
           "wer": [
             null,
             10.07
@@ -225,7 +225,7 @@
             null,
             52.2
           ],
-          "note": "C++ only: word-timestamps task selected by AUTO, vs 8.19 / 65.6 for plain transcription"
+          "note": "C++ only, explicit timestamps=word: lowercase, unpunctuated, vs 8.19 / 65.6 for plain transcription; why AUTO stays on plain transcription"
         }
       }
     },
