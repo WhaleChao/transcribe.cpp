@@ -267,6 +267,8 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
     }
     // Generic vocabulary as keyword-list biasing, on the variants whose model
     // cards document it and where it was measured (build_granite_affixes).
+    // Transcript prefix: -plus's prefix_text (IBM model card; measured clean).
+    transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX, m->variant == "granite-speech-4.1-2b-plus");
     transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_VOCABULARY,
                             m->variant == "granite-4.0-1b-speech" || m->variant == "granite-speech-4.1-2b" ||
                                 m->variant == "granite-speech-4.1-2b-plus");
@@ -656,6 +658,25 @@ static transcribe_status build_granite_affixes(GraniteModel *                cm,
         }
         suffix_ids.insert(suffix_ids.end(), asst_ids.begin(), asst_ids.end());
         suffix_ids.push_back(cm->chat_tokens.end_of_role);
+
+        // Transcript prefix (-plus, IBM's prefix_text): the assistant turn
+        // opens with it verbatim. Its composition with the word-timestamp and
+        // speaker-attribution tasks is untested, so those reject it.
+        if (params != nullptr && params->prefix != nullptr) {
+            if (!is_plus || !asr_mode) {
+                log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                        "granite: a transcript prefix is supported in plain transcription only (not word timestamps "
+                        "or speaker attribution)");
+                return TRANSCRIBE_ERR_INVALID_ARG;
+            }
+            std::vector<int32_t> prefix_ids;
+            if (const transcribe_status st =
+                    transcribe::prompting::encode_plain(cm->tok, params->prefix, prefix_ids, "prefix");
+                st != TRANSCRIBE_OK) {
+                return st;
+            }
+            suffix_ids.insert(suffix_ids.end(), prefix_ids.begin(), prefix_ids.end());
+        }
     } else {
         const std::string prefix_text = "USER: ";
         const std::string suffix_text = instruction + "\n ASSISTANT:";
@@ -1353,13 +1374,25 @@ transcribe_status run(transcribe_session *          ctx_base,
     }
 
     // Detokenize.
-    const std::string raw_text = cm->tok.decode(gen_ids.data(), static_cast<int>(gen_ids.size()));
+    std::string   raw_text = cm->tok.decode(gen_ids.data(), static_cast<int>(gen_ids.size()));
     const int64_t audio_ms = static_cast<int64_t>(n_samples) * 1000 / static_cast<int64_t>(cm->hparams.fe_sample_rate);
+
+    // Under a transcript prefix the decode is the continuation: the text
+    // fields hold it (without the joining space), raw_text leads with the
+    // prefix.
+    const bool has_prefix = params != nullptr && params->prefix != nullptr;
+    if (has_prefix) {
+        raw_text.erase(0, raw_text.find_first_not_of(' ') == std::string::npos ? raw_text.size() :
+                                                                                 raw_text.find_first_not_of(' '));
+    }
 
     cc->has_result = true;
     // -plus word timestamps / speaker attribution / plain text; shared with
     // the run_batch capture loop via finalize_granite_result.
     finalize_granite_result(cm, params, raw_text, audio_ms, *cc);
+    if (has_prefix) {
+        cc->raw_text = std::string(params->prefix) + cm->tok.decode(gen_ids.data(), static_cast<int>(gen_ids.size()));
+    }
 
     // Output truncation (decode hit the generation budget / context ceiling
     // before EOS) is a hard status, not a silent success: surface it so the
