@@ -517,10 +517,21 @@ static const char * granite_target_language_name(const char * code_or_name) {
 }
 
 // Whether this run uses IBM's word-timestamps task (-plus only; other variants
-// advertise NONE): an explicit WORD request. AUTO does not request it.
+// advertise NONE). An explicit WORD request selects it; AUTO does too — the
+// richest output the model has — unless a task that needs the plain
+// transcription instruction is requested: speaker attribution (a separate
+// task upstream), vocabulary keywords or a transcript prefix (both measured
+// and documented on the plain instruction only).
 static bool granite_word_timestamps(const transcribe_model * m, const transcribe_run_params * params) {
-    return params != nullptr && m->caps.max_timestamp_kind == TRANSCRIBE_TIMESTAMPS_WORD &&
-           params->task == TRANSCRIBE_TASK_TRANSCRIBE && params->timestamps == TRANSCRIBE_TIMESTAMPS_WORD;
+    if (params == nullptr || m->caps.max_timestamp_kind != TRANSCRIBE_TIMESTAMPS_WORD ||
+        params->task != TRANSCRIBE_TASK_TRANSCRIBE) {
+        return false;
+    }
+    if (params->timestamps == TRANSCRIBE_TIMESTAMPS_WORD) {
+        return true;
+    }
+    return params->timestamps == TRANSCRIBE_TIMESTAMPS_AUTO && !diarize_requested(m, params) &&
+           params->n_vocabulary == 0 && params->prefix == nullptr;
 }
 
 // Predicted transcript length for the decode budget. The word-timestamps task
