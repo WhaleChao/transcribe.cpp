@@ -1382,8 +1382,8 @@ transcribe_status run(transcribe_session *          ctx_base,
     // prefix.
     const bool has_prefix = params != nullptr && params->prefix != nullptr;
     if (has_prefix) {
-        raw_text.erase(0, raw_text.find_first_not_of(' ') == std::string::npos ? raw_text.size() :
-                                                                                 raw_text.find_first_not_of(' '));
+        const size_t lead = raw_text.find_first_not_of(' ');
+        raw_text.erase(0, lead == std::string::npos ? raw_text.size() : lead);
     }
 
     cc->has_result = true;

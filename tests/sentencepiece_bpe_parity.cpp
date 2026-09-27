@@ -133,12 +133,14 @@ int main(int argc, char ** argv) {
         return run(argv[1], argv[2], lo, hi, rmws) == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
     }
     const std::string dir = std::string(TRANSCRIBE_TEST_FIXTURES_DIR) + "/sentencepiece_bpe/";
+
     struct Gate {
         const char * env;
         const char * fixture;
         int          lo, hi;
         bool         rmws;  // the SentencePiece model's remove_extra_whitespaces
     };
+
     // canary-1b/180m-flash: the English sub-vocab is lang_offsets[1] = 1152,
     // 1024 pieces (stt.canary.tokenizer.lang_*).
     const Gate gates[] = {
