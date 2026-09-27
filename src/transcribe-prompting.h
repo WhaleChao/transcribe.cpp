@@ -35,6 +35,9 @@ std::vector<std::string> terms(const transcribe_run_params * p);
 
 std::string join(const std::vector<std::string> & terms, const char * sep);
 
+// `s` without leading / trailing whitespace (std::isspace).
+std::string strip(const std::string & s);
+
 // Rejects user text containing a literal of one of the tokenizer's control
 // tokens (e.g. "<|im_end|>", "[INST]"). The encoders never produce control
 // ids from text, but the upstream reference tokenizers do, so accepting such
@@ -55,7 +58,12 @@ transcribe_status encode_plain(const Tokenizer &      tok,
 // space). When both exceed `budget` tokens the context is trimmed first,
 // keeping its most recent tokens, then terms are dropped from the end of the
 // list (the spec's overflow order), with one WARN naming what was dropped.
-// budget < 0 means unlimited. Terms and context are control-token checked.
+// A negative budget is treated as 0. Terms and context are control-token
+// checked.
+//
+// The result depends on the budget only through what it forces out: when the
+// fit for budget B1 is at most B2 < B1 tokens, the fit for B2 is identical.
+// Batch paths rely on this to share one fit across rows (see n_tokens()).
 struct TermsFormat {
     std::string lead;
     std::string sep;
@@ -66,6 +74,9 @@ struct FittedPrompt {
     std::vector<int32_t> term_ids;
     std::vector<int32_t> ctx_ids;
     size_t               n_terms = 0;  // terms kept
+    std::string          terms_text;   // the kept terms rendered (lead + join + trail); empty if none
+
+    size_t n_tokens() const { return term_ids.size() + ctx_ids.size(); }
 };
 
 transcribe_status fit_terms_and_context(const Tokenizer &                tok,
@@ -76,11 +87,12 @@ transcribe_status fit_terms_and_context(const Tokenizer &                tok,
                                         const char *                     family,
                                         FittedPrompt &                   out);
 
-// Rendered-prompt observability for parity tests. Decodes `ids` with special
-// pieces kept, collapsing each run of `audio_id` to "<piece>xN" (the reference
-// harness format). When TRANSCRIBE_PROMPT_DUMP names a file a line
-// `family<TAB>n_tokens<TAB>text` is appended there (\\, \n, \t escaped); otherwise it is logged at DEBUG (truncated to the log
-// line limit).
+// Rendered-prompt observability for parity tests, active only when
+// TRANSCRIBE_PROMPT_DUMP names a file (dump_enabled()): appends a line
+// `family<TAB>n_tokens<TAB>text` there (\\, \n, \t escaped), decoding `ids`
+// with special pieces kept and collapsing each run of `audio_id` to
+// "<piece>xN" (the reference harness format).
+bool dump_enabled();
 void dump_rendered(const Tokenizer & tok, const std::vector<int32_t> & ids, int32_t audio_id, const char * family);
 
 }  // namespace prompting

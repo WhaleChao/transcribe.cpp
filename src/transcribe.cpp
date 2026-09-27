@@ -405,7 +405,7 @@ transcribe_status validate_run_params_common(const transcribe_session * session,
 
 // Shape and hard-gate checks for the generic prompting fields. `params` is
 // a normalized (full-size) view, so the trailing fields are always readable.
-// Soft inputs a model ignores are removed later by strip_ignored_prompting;
+// Soft inputs a model ignores are removed later by prepare_prompting;
 // everything here is a caller error that must preserve the prior snapshot.
 transcribe_status validate_prompting(const transcribe_model * model, const transcribe_run_params * params) {
     auto reject = [](transcribe_status st, const char * why) {
@@ -492,18 +492,18 @@ void normalize_run_params(const transcribe_run_params * in, transcribe_run_param
 
 // Warn about, then remove, the soft prompting inputs this model ignores, so
 // a family only ever sees inputs it should act on. Runs on a validated
-// normalized view. Idempotent: a stripped view warns nothing the second time
-// (the batch serial fallback re-enters run_one_inner per utterance).
+// normalized view (validate_prompting has already rejected INSTRUCT on a
+// model without the feature). Idempotent: a stripped view warns nothing the
+// second time (the batch serial fallback re-enters run_one_inner per
+// utterance).
 void strip_ignored_prompting(const transcribe_model * model, transcribe_run_params * params) {
     const char * arch_name = (model->arch != nullptr && model->arch->name != nullptr) ? model->arch->name : "(unknown)";
     const bool   instruct  = params->task == TRANSCRIBE_TASK_INSTRUCT;
-    const bool   has_v     = transcribe::has_feature(model, TRANSCRIBE_FEATURE_VOCABULARY);
-    const bool   has_i     = transcribe::has_feature(model, TRANSCRIBE_FEATURE_INSTRUCT);
-    if (params->n_vocabulary > 0 && (!has_v || (instruct && !has_i))) {
+    if (params->n_vocabulary > 0 && !transcribe::has_feature(model, TRANSCRIBE_FEATURE_VOCABULARY)) {
         transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
-                            "transcribe_run: model '%s' does not support vocabulary%s; ignoring %d term(s). Use "
+                            "transcribe_run: model '%s' does not support vocabulary; ignoring %d term(s). Use "
                             "transcribe_model_supports(model, TRANSCRIBE_FEATURE_VOCABULARY) to pre-check.",
-                            arch_name, (has_v && instruct) ? " under INSTRUCT" : "", params->n_vocabulary);
+                            arch_name, params->n_vocabulary);
         params->vocabulary   = nullptr;
         params->n_vocabulary = 0;
     }
@@ -522,6 +522,14 @@ void strip_ignored_prompting(const transcribe_model * model, transcribe_run_para
     if (!transcribe::prompting::has_text(params->prefix)) {
         params->prefix = nullptr;
     }
+}
+
+// The pre-clear prompting step every entry point shares: drop the soft inputs
+// the model ignores, then reject control-token literals in what remains.
+// `params` is the entry point's normalized view, already validated.
+transcribe_status prepare_prompting(const transcribe_model * model, transcribe_run_params * params) {
+    strip_ignored_prompting(model, params);
+    return check_prompting_text(model, params);
 }
 
 }  // namespace
@@ -1948,8 +1956,7 @@ static transcribe_status transcribe_stream_begin_impl(struct transcribe_session 
     // clear_result so the pre-hook "snapshot preserved on rejection"
     // contract is undisturbed.
     warn_unsupported_advisory(session->model, run_params);
-    strip_ignored_prompting(session->model, &run_params_view);
-    if (const transcribe_status st = check_prompting_text(session->model, run_params); st != TRANSCRIBE_OK) {
+    if (const transcribe_status st = prepare_prompting(session->model, &run_params_view); st != TRANSCRIBE_OK) {
         return st;
     }
 
@@ -2333,8 +2340,7 @@ static transcribe_status run_one_inner(struct transcribe_session *          sess
         if (params->task == TRANSCRIBE_TASK_TRANSLATE && !session->model->caps.supports_translate) {
             return TRANSCRIBE_ERR_UNSUPPORTED_TASK;
         }
-        strip_ignored_prompting(session->model, &params_view);
-        if (const transcribe_status st = check_prompting_text(session->model, params); st != TRANSCRIBE_OK) {
+        if (const transcribe_status st = prepare_prompting(session->model, &params_view); st != TRANSCRIBE_OK) {
             return st;
         }
 
@@ -2513,8 +2519,7 @@ static transcribe_status transcribe_run_batch_impl(struct transcribe_session *  
         if (params->task == TRANSCRIBE_TASK_TRANSLATE && !session->model->caps.supports_translate) {
             return TRANSCRIBE_ERR_UNSUPPORTED_TASK;
         }
-        strip_ignored_prompting(session->model, &params_view);
-        if (const transcribe_status st = check_prompting_text(session->model, params); st != TRANSCRIBE_OK) {
+        if (const transcribe_status st = prepare_prompting(session->model, &params_view); st != TRANSCRIBE_OK) {
             return st;
         }
         if (session->model->arch != nullptr && session->model->arch->run_validate != nullptr) {

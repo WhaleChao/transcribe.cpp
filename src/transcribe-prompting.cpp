@@ -7,6 +7,7 @@
 #include "transcribe-tokenizer.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 
 namespace transcribe::prompting {
@@ -23,6 +24,17 @@ std::vector<std::string> terms(const transcribe_run_params * p) {
         }
     }
     return out;
+}
+
+std::string strip(const std::string & s) {
+    size_t a = 0, b = s.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) {
+        ++a;
+    }
+    while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) {
+        --b;
+    }
+    return s.substr(a, b - a);
 }
 
 std::string join(const std::vector<std::string> & terms, const char * sep) {
@@ -84,56 +96,87 @@ transcribe_status encode_plain(const Tokenizer &      tok,
 }
 
 transcribe_status fit_terms_and_context(const Tokenizer &                tok,
-                                        const std::vector<std::string> & terms_in,
+                                        const std::vector<std::string> & terms,
                                         const TermsFormat &              fmt,
                                         const std::string &              ctx,
                                         int                              budget,
                                         const char *                     family,
                                         FittedPrompt &                   out) {
-    out                                   = FittedPrompt{};
-    std::vector<std::string> terms        = terms_in;
-    auto                     encode_terms = [&]() -> transcribe_status {
-        out.term_ids.clear();
-        return terms.empty() ?
-                   TRANSCRIBE_OK :
-                   encode_plain(tok, fmt.lead + join(terms, fmt.sep.c_str()) + fmt.trail, out.term_ids, "vocabulary");
+    out                 = FittedPrompt{};
+    const size_t cap    = static_cast<size_t>(std::max(budget, 0));
+    // The first k terms as rendered text, and its ids.
+    auto         render = [&](size_t k) {
+        std::string text;
+        if (k > 0) {
+            text = fmt.lead;
+            for (size_t i = 0; i < k; ++i) {
+                text += (i != 0 ? fmt.sep : std::string()) + terms[i];
+            }
+            text += fmt.trail;
+        }
+        return text;
     };
-    if (const transcribe_status st = encode_terms(); st != TRANSCRIBE_OK) {
+    auto encode_terms = [&](size_t k, std::vector<int32_t> & ids) -> transcribe_status {
+        ids.clear();
+        return k == 0 ? TRANSCRIBE_OK : encode_plain(tok, render(k), ids, "vocabulary");
+    };
+    size_t kept = terms.size();
+    if (const transcribe_status st = encode_terms(kept, out.term_ids); st != TRANSCRIBE_OK) {
         return st;
     }
     if (const transcribe_status st = encode_plain(tok, ctx, out.ctx_ids, "prompt"); st != TRANSCRIBE_OK) {
         return st;
     }
     const size_t ctx_in = out.ctx_ids.size();
-    if (budget >= 0 && out.term_ids.size() + out.ctx_ids.size() > static_cast<size_t>(budget)) {
-        const size_t cap  = static_cast<size_t>(budget);
+    if (out.n_tokens() > cap) {
         const size_t room = out.term_ids.size() < cap ? cap - out.term_ids.size() : 0;
         out.ctx_ids.erase(out.ctx_ids.begin(), out.ctx_ids.end() - std::min(room, out.ctx_ids.size()));
-        while (!terms.empty() && out.term_ids.size() > cap) {
-            terms.pop_back();
-            if (const transcribe_status st = encode_terms(); st != TRANSCRIBE_OK) {
+        if (out.term_ids.size() > cap) {
+            // The most terms that fit, by binary search over the count (the
+            // token count grows with it): 0 terms always fit, all do not.
+            size_t               lo = 0, hi = kept;
+            std::vector<int32_t> ids;
+            while (hi - lo > 1) {
+                const size_t mid = lo + (hi - lo) / 2;
+                if (const transcribe_status st = encode_terms(mid, ids); st != TRANSCRIBE_OK) {
+                    return st;
+                }
+                (ids.size() <= cap ? lo : hi) = mid;
+            }
+            kept = lo;
+            if (const transcribe_status st = encode_terms(kept, out.term_ids); st != TRANSCRIBE_OK) {
                 return st;
             }
         }
         char terms_note[96] = "";
-        if (terms.size() < terms_in.size()) {
-            std::snprintf(terms_note, sizeof(terms_note), "dropped %zu of %zu vocabulary terms",
-                          terms_in.size() - terms.size(), terms_in.size());
+        if (kept < terms.size()) {
+            std::snprintf(terms_note, sizeof(terms_note), "dropped %zu of %zu vocabulary terms", terms.size() - kept,
+                          terms.size());
         }
         char ctx_note[96] = "";
         if (out.ctx_ids.size() < ctx_in) {
             std::snprintf(ctx_note, sizeof(ctx_note), "kept the last %zu of %zu context tokens", out.ctx_ids.size(),
                           ctx_in);
         }
-        log_msg(TRANSCRIBE_LOG_LEVEL_WARN, "%s: %s%s%s (prompt budget: %d tokens)", family, terms_note,
-                (terms_note[0] != '\0' && ctx_note[0] != '\0') ? "; " : "", ctx_note, budget);
+        log_msg(TRANSCRIBE_LOG_LEVEL_WARN, "%s: %s%s%s (prompt budget: %zu tokens)", family, terms_note,
+                (terms_note[0] != '\0' && ctx_note[0] != '\0') ? "; " : "", ctx_note, cap);
     }
-    out.n_terms = terms.size();
+    out.n_terms    = kept;
+    out.terms_text = render(kept);
     return TRANSCRIBE_OK;
 }
 
+bool dump_enabled() {
+    return env::str("TRANSCRIBE_PROMPT_DUMP") != nullptr;
+}
+
 void dump_rendered(const Tokenizer & tok, const std::vector<int32_t> & ids, int32_t audio_id, const char * family) {
-    std::string out;
+    const char * path = env::str("TRANSCRIBE_PROMPT_DUMP");
+    if (path == nullptr) {
+        return;
+    }
+    // One line per prompt: backslash, newline and tab are escaped.
+    std::string line;
     for (size_t i = 0; i < ids.size();) {
         const int id = ids[i];
         size_t    j  = i + 1;
@@ -142,16 +185,7 @@ void dump_rendered(const Tokenizer & tok, const std::vector<int32_t> & ids, int3
                 ++j;
             }
         }
-        out += tok.decode(&id, 1);
-        if (j - i > 1) {
-            out += "x" + std::to_string(j - i);
-        }
-        i = j;
-    }
-    if (const char * path = env::str("TRANSCRIBE_PROMPT_DUMP")) {
-        // One line per prompt: backslash, newline and tab are escaped.
-        std::string line;
-        for (char c : out) {
+        for (const char c : tok.decode(&id, 1)) {
             if (c == '\\') {
                 line += "\\\\";
             } else if (c == '\n') {
@@ -162,15 +196,17 @@ void dump_rendered(const Tokenizer & tok, const std::vector<int32_t> & ids, int3
                 line += c;
             }
         }
-        if (std::FILE * f = std::fopen(path, "ab")) {
-            std::fprintf(f, "%s\t%zu\t", family, ids.size());
-            std::fwrite(line.data(), 1, line.size(), f);
-            std::fputc('\n', f);
-            std::fclose(f);
+        if (j - i > 1) {
+            line += "x" + std::to_string(j - i);
         }
-        return;
+        i = j;
     }
-    log_msg(TRANSCRIBE_LOG_LEVEL_DEBUG, "%s prompt (%zu tokens): %s", family, ids.size(), out.c_str());
+    if (std::FILE * f = std::fopen(path, "ab")) {
+        std::fprintf(f, "%s\t%zu\t", family, ids.size());
+        std::fwrite(line.data(), 1, line.size(), f);
+        std::fputc('\n', f);
+        std::fclose(f);
+    }
 }
 
 }  // namespace transcribe::prompting

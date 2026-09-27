@@ -1157,8 +1157,8 @@ struct transcribe_run_params {
      *   library formats them for the family (TRANSCRIBE_FEATURE_VOCABULARY);
      *   callers who want their own format leave this empty and put text in
      *   `prompt`. Rendered terms precede `prompt` on models with a single
-     *   text slot. Without the feature, or under INSTRUCT on a model that
-     *   lacks VOCABULARY or INSTRUCT, the terms are ignored with a WARN.
+     *   text slot. Without the feature (under any task) the terms are
+     *   ignored with a WARN.
      *   When the family's prompt budget overflows, terms are dropped from
      *   the end of the list with a WARN. n_vocabulary < 0, a NULL array
      *   with n_vocabulary > 0, or a NULL entry is TRANSCRIBE_ERR_INVALID_ARG.
@@ -1443,7 +1443,12 @@ TRANSCRIBE_API transcribe_status transcribe_model_get_capabilities(const struct 
  *                        forced decoder text.
  *
  * The prompting bits are advertised only where the behavior is documented
- * upstream or measured, not merely where the model accepts text.
+ * upstream or measured, not merely where the model accepts text. A bit
+ * guarantees the input takes effect in plain transcription; under another
+ * task or output mode a family may ignore a soft input (vocabulary, context
+ * prompt) with a WARN where its model doc lists the combination as
+ * unsupported. A transcript prefix the model cannot honor is always an
+ * error.
  *
  * Returns false on NULL model or unknown feature enum.
  */

@@ -610,7 +610,7 @@ transcribe_status run(transcribe_session *          session,
 
     // ----- Prompt mode -----
     std::string instruction;
-    const bool  translate = instruct_instruction(params, instruction);
+    const bool  use_instruct_prompt = instruct_instruction(params, instruction);
 
     if (!cm->mel.has_value()) {
         log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "voxtral run: model has no MelFrontend");
@@ -749,7 +749,7 @@ transcribe_status run(transcribe_session *          session,
     // ----- Prompt construction -----
     std::vector<int32_t> prompt_ids;
     int                  prefix_len = 0, suffix_len = 0;
-    if (translate) {
+    if (use_instruct_prompt) {
         if (const transcribe_status st =
                 build_instruct_prompt(*cm, instruction, n_audio_total, prompt_ids, prefix_len, suffix_len);
             st != TRANSCRIBE_OK) {
@@ -1123,8 +1123,8 @@ transcribe_status run_batch(transcribe_session *          session,
 
     // ----- Prompt mode (uniform across the batch) -----
     std::string  instruction;
-    const bool   translate = instruct_instruction(params, instruction);
-    const char * lang      = (params != nullptr) ? params->language : nullptr;
+    const bool   use_instruct_prompt = instruct_instruction(params, instruction);
+    const char * lang                = (params != nullptr) ? params->language : nullptr;
 
     // ----- Chunk geometry -----
     int samples_per_chunk = hp.fe_n_samples;
@@ -1292,7 +1292,7 @@ transcribe_status run_batch(transcribe_session *          session,
         }
         const int               n_audio = n_chunks[b] * audio_per_chunk;
         int                     pfx = 0, sfx = 0;
-        const transcribe_status st = translate ?
+        const transcribe_status st = use_instruct_prompt ?
                                          build_instruct_prompt(*cm, instruction, n_audio, prompt_ids[b], pfx, sfx) :
                                          build_transcription_prompt(*cm, lang, n_audio, prompt_ids[b], pfx, sfx);
         if (st != TRANSCRIBE_OK) {

@@ -154,16 +154,31 @@ constexpr const char k_hotword_preamble[] =
     "\n\n\n**\xE4\xB8\x8A\xE4\xB8\x8B\xE6\x96\x87\xE4\xBF\xA1\xE6\x81\xAF\xEF\xBC\x9A**\n\n\n"
     "\xE7\x83\xAD\xE8\xAF\x8D\xE5\x88\x97\xE8\xA1\xA8\xEF\xBC\x9A[";
 
+// Token room for the hotword block alongside `n_audio` audio tokens: what the
+// context window leaves after the generation reserve and the representative
+// prompt overhead. run() passes its clip; run_batch() passes 0.
+int hotword_budget(int ceiling, int n_audio) {
+    return ceiling - k_gen_reserve - n_audio - k_prompt_overhead_tokens;
+}
+
+// Generic vocabulary -> the upstream hotword block (preamble, ", "-joined
+// terms, "]\n"), fitted to `budget` tokens. fit_terms_and_context also rejects
+// control-token literals, which encode_with_chat_specials would otherwise
+// honor. `fit.terms_text` is the block; empty without terms.
+transcribe_status fit_hotwords(const transcribe::Tokenizer &         tok,
+                               const transcribe_run_params *         params,
+                               int                                   budget,
+                               const char *                          who,
+                               transcribe::prompting::FittedPrompt & fit) {
+    return transcribe::prompting::fit_terms_and_context(tok, transcribe::prompting::terms(params),
+                                                        { k_hotword_preamble, ", ", "]\n" }, "", budget, who, fit);
+}
+
 // Build the prompt text the reference's FunASRNano.get_prompt produces,
-// byte for byte: an optional hotword block (the generic vocabulary, ", "-
-// joined), then the language / itn transcription instruction.
-std::string build_funasr_prompt_text(const std::vector<std::string> & hotwords, const char * lang, bool use_itn) {
-    std::string out;
-    if (!hotwords.empty()) {
-        out = k_hotword_preamble;
-        out += transcribe::prompting::join(hotwords, ", ");
-        out += "]\n";
-    }
+// byte for byte: the hotword block (fit_hotwords; may be empty), then the
+// language / itn transcription instruction.
+std::string build_funasr_prompt_text(const std::string & hotword_block, const char * lang, bool use_itn) {
+    std::string out = hotword_block;
     if (lang != nullptr && lang[0] != '\0') {
         // 语音转写成 = "transcribe to" / "transcribe into"
         out += "\xE8\xAF\xAD\xE9\x9F\xB3\xE8\xBD\xAC\xE5\x86\x99\xE6\x88\x90";
@@ -239,18 +254,18 @@ transcribe_status encode_with_chat_specials(const transcribe::Tokenizer & tok,
 // for each text segment it calls tokenizer.encode(...). We mirror that
 // boundary exactly; encode_with_chat_specials handles the
 // <|im_start|>/<|im_end|> within each segment.
-transcribe_status build_funasr_nano_prompt(const transcribe::Tokenizer &    tok,
-                                           const ChatTokens &               ct,
-                                           const std::vector<std::string> & hotwords,
-                                           const char *                     language,
-                                           bool                             use_itn,
-                                           int                              fake_token_len,
-                                           std::vector<int32_t> &           out_ids,
-                                           int &                            out_fbank_beg) {
+transcribe_status build_funasr_nano_prompt(const transcribe::Tokenizer & tok,
+                                           const ChatTokens &            ct,
+                                           const std::string &           hotword_block,
+                                           const char *                  language,
+                                           bool                          use_itn,
+                                           int                           fake_token_len,
+                                           std::vector<int32_t> &        out_ids,
+                                           int &                         out_fbank_beg) {
     out_ids.clear();
     out_fbank_beg = 0;
 
-    const std::string prompt_text = build_funasr_prompt_text(hotwords, language, use_itn);
+    const std::string prompt_text = build_funasr_prompt_text(hotword_block, language, use_itn);
 
     std::string seg_a =
         "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
@@ -675,29 +690,20 @@ transcribe_status run(transcribe_session *          session,
         }
     }
 
-    // Generic vocabulary -> upstream hotword list, fitted to the room the
-    // context window leaves after the audio, the rest of the prompt and the
-    // generation reserve. fit_terms_and_context also rejects control-token
-    // literals, which encode_with_chat_specials below would otherwise honor.
-    std::vector<std::string> hotwords = transcribe::prompting::terms(params);
-    if (!hotwords.empty()) {
-        transcribe::prompting::FittedPrompt fit;
-        if (const transcribe_status st = transcribe::prompting::fit_terms_and_context(
-                cm->tok, hotwords, { k_hotword_preamble, ", ", "]\n" }, "",
-                std::max(funasr_nano_context_ceiling(cc->n_ctx, hp) - k_gen_reserve - fake_token_len -
-                             k_prompt_overhead_tokens,
-                         0),
-                "funasr_nano run", fit);
-            st != TRANSCRIBE_OK) {
-            return st;
-        }
-        hotwords.resize(fit.n_terms);
+    // Hotword list, fitted to the room the context window leaves after the
+    // audio, the rest of the prompt and the generation reserve.
+    transcribe::prompting::FittedPrompt hotwords;
+    if (const transcribe_status st =
+            fit_hotwords(cm->tok, params, hotword_budget(funasr_nano_context_ceiling(cc->n_ctx, hp), fake_token_len),
+                         "funasr_nano run", hotwords);
+        st != TRANSCRIBE_OK) {
+        return st;
     }
 
     std::vector<int32_t> prompt_ids;
     int                  fbank_beg = 0;
-    if (const transcribe_status st = build_funasr_nano_prompt(cm->tok, cm->chat_tokens, hotwords, lang, use_itn,
-                                                              fake_token_len, prompt_ids, fbank_beg);
+    if (const transcribe_status st = build_funasr_nano_prompt(cm->tok, cm->chat_tokens, hotwords.terms_text, lang,
+                                                              use_itn, fake_token_len, prompt_ids, fbank_beg);
         st != TRANSCRIBE_OK) {
         return st;
     }
@@ -1149,18 +1155,13 @@ transcribe_status run_batch(transcribe_session *          session,
     const char * lang    = (params != nullptr) ? params->language : nullptr;
     bool         use_itn = (params != nullptr && params->itn == TRANSCRIBE_ITN_MODE_ON);
 
-    // Shared hotword list (one run_params per batch), budgeted without audio;
-    // a clip that then does not fit is that row's INPUT_TOO_LONG.
-    std::vector<std::string> hotwords = transcribe::prompting::terms(params);
-    if (!hotwords.empty()) {
-        transcribe::prompting::FittedPrompt fit;
-        if (transcribe::prompting::fit_terms_and_context(
-                cm->tok, hotwords, { k_hotword_preamble, ", ", "]\n" }, "",
-                std::max(ceiling - k_gen_reserve - k_prompt_overhead_tokens, 0), "funasr_nano run_batch",
-                fit) != TRANSCRIBE_OK) {
-            return run_batch_serial(cc, pcm, n_samples, n, params);
-        }
-        hotwords.resize(fit.n_terms);
+    // Shared hotword list (one run_params per batch), fitted as if there were
+    // no audio. A row whose own budget is smaller than that fit would get
+    // fewer hotwords from run(), so the batch then goes serial (see
+    // fit_terms_and_context: otherwise the fits match).
+    transcribe::prompting::FittedPrompt hotwords;
+    if (fit_hotwords(cm->tok, params, hotword_budget(ceiling, 0), "funasr_nano run_batch", hotwords) != TRANSCRIBE_OK) {
+        return run_batch_serial(cc, pcm, n_samples, n, params);
     }
 
     // ---- Pass 0: parallel frontend (kaldi-fbank, host-side, thread-safe) ----
@@ -1194,9 +1195,12 @@ transcribe_status run_batch(transcribe_session *          session,
         if (audio_embed_one(cc, cm, fbufs[b], T_lfr[b], audio_hosts[b], T_audio[b], enc_us) != TRANSCRIBE_OK) {
             continue;
         }
+        if (static_cast<int>(hotwords.n_tokens()) > std::max(hotword_budget(ceiling, T_audio[b]), 0)) {
+            return run_batch_serial(cc, pcm, n_samples, n, params);
+        }
         int fbank_beg = 0;
-        if (build_funasr_nano_prompt(cm->tok, cm->chat_tokens, hotwords, lang, use_itn, T_audio[b], prompt_ids[b],
-                                     fbank_beg) != TRANSCRIBE_OK) {
+        if (build_funasr_nano_prompt(cm->tok, cm->chat_tokens, hotwords.terms_text, lang, use_itn, T_audio[b],
+                                     prompt_ids[b], fbank_beg) != TRANSCRIBE_OK) {
             continue;
         }
         T_prompt[b] = static_cast<int>(prompt_ids[b].size());

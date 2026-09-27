@@ -949,6 +949,36 @@ bool whisper_has_generic_prompt(const transcribe_run_params * params) {
     return params != nullptr && (params->n_vocabulary > 0 || transcribe::prompting::has_text(params->prompt));
 }
 
+// Token cap on the <|startofprev|> slot: the run extension's
+// max_prev_context_tokens, else half the decoder window minus one (openai).
+int whisper_prev_cap(const transcribe_whisper_run_ext & wp, const WhisperHParams & hp) {
+    return wp.max_prev_context_tokens > 0 ? wp.max_prev_context_tokens : hp.dec_max_target_positions / 2 - 1;
+}
+
+// Transcript prefix ids (openai DecodingOptions.prefix): " " + strip(prefix),
+// plain text only. Empty when the prefix is absent or all whitespace. Shared
+// by whisper_run and whisper_run_validate so the validated length is the one
+// that runs.
+transcribe_status whisper_prefix_ids(const WhisperModel & cm, const char * prefix, std::vector<int32_t> & out) {
+    out.clear();
+    const std::string text = prefix != nullptr ? transcribe::prompting::strip(prefix) : std::string();
+    if (text.empty()) {
+        return TRANSCRIBE_OK;
+    }
+    if (const transcribe_status st = transcribe::prompting::encode_plain(cm.tok, " " + text, out, "prefix");
+        st != TRANSCRIBE_OK) {
+        return st;
+    }
+    const int eos_id = cm.tok.eos_id() >= 0 ? cm.tok.eos_id() : 50257;  // as whisper_run
+    for (int32_t id : out) {
+        if (id >= eos_id) {
+            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "whisper run: prefix encodes to special token id %d", id);
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+    }
+    return TRANSCRIBE_OK;
+}
+
 // Generic prompting (transcribe_run_params::vocabulary / prompt) rendered into
 // the <|startofprev|> slot, as text-only ids (the caller prepends the marker).
 // Text is `Glossary: {terms}` (", "-joined), then " " + prompt, tokenized in
@@ -964,15 +994,10 @@ transcribe_status whisper_generic_prompt_ids(const WhisperModel &          cm,
                                              int                           eos_id,
                                              std::vector<int32_t> &        out) {
     out.clear();
-    std::string ctx = params->prompt != nullptr ? params->prompt : "";
-    size_t      a = 0, b = ctx.size();
-    while (a < b && std::isspace(static_cast<unsigned char>(ctx[a]))) {
-        ++a;
+    std::string ctx = params->prompt != nullptr ? transcribe::prompting::strip(params->prompt) : std::string();
+    if (!ctx.empty()) {
+        ctx = " " + ctx;
     }
-    while (b > a && std::isspace(static_cast<unsigned char>(ctx[b - 1]))) {
-        --b;
-    }
-    ctx = b > a ? " " + ctx.substr(a, b - a) : std::string();
     transcribe::prompting::FittedPrompt fit;
     if (const transcribe_status st = transcribe::prompting::fit_terms_and_context(
             cm.tok, transcribe::prompting::terms(params), { " Glossary: ", ", ", "" }, ctx, budget, "whisper run", fit);
@@ -1579,8 +1604,7 @@ transcribe_status whisper_run(transcribe_session *          session,
     // text-side only); or initial_prompt string, tokenized as HF's
     // get_prompt_ids form ("<|startofprev|> " + strip) with any special token
     // (id >= eos_id) in the text rejected (tokenization_whisper.py).
-    const int max_prev_cap =
-        wp->max_prev_context_tokens > 0 ? wp->max_prev_context_tokens : (cm->hparams.dec_max_target_positions / 2 - 1);
+    const int            max_prev_cap = whisper_prev_cap(*wp, cm->hparams);
     std::vector<int32_t> prompt_text_ids;
     if (wp->prompt_tokens != nullptr && wp->n_prompt_tokens > 0) {
         // The library prepends <|startofprev|>; a leading prev_sot id from the
@@ -1658,9 +1682,24 @@ transcribe_status whisper_run(transcribe_session *          session,
             }
         }
     }
-    // Cap prompt tokens to max_prev_cap (left-truncate, keep most-recent).
-    if (static_cast<int>(prompt_text_ids.size()) > max_prev_cap) {
-        prompt_text_ids.erase(prompt_text_ids.begin(), prompt_text_ids.end() - max_prev_cap);
+    // Transcript prefix (openai DecodingOptions.prefix), right after the SOT
+    // sequence on the first window only. It sits in the prompt, so the
+    // timestamp rules (which read generated_ids) begin after it and the result
+    // text holds only the continuation; raw_text leads with it.
+    std::vector<int32_t> prefix_ids;
+    if (const transcribe_status st = whisper_prefix_ids(*cm, params != nullptr ? params->prefix : nullptr, prefix_ids);
+        st != TRANSCRIBE_OK) {
+        return st;
+    }
+    all_raw_ids.insert(all_raw_ids.end(), prefix_ids.begin(), prefix_ids.end());
+
+    // Cap prompt tokens (left-truncate, keep most-recent). The prefix shares
+    // the conditioning half of the decoder window with the prompt, so the
+    // first window's prompt + prefix stay within max_prev_cap and the rest of
+    // the window is left for the continuation.
+    const int prompt_cap = std::max(max_prev_cap - static_cast<int>(prefix_ids.size()), 0);
+    if (static_cast<int>(prompt_text_ids.size()) > prompt_cap) {
+        prompt_text_ids.erase(prompt_text_ids.begin(), prompt_text_ids.end() - prompt_cap);
     }
     // Generic vocabulary / context prompt share the same slot and budget
     // (whisper_run_validate rejects them alongside the extension prompt).
@@ -1670,40 +1709,9 @@ transcribe_status whisper_run(transcribe_session *          session,
                     "whisper run: model has no <|startofprev|> token; prompting unavailable");
             return TRANSCRIBE_ERR_GGUF;
         }
-        if (const transcribe_status st = whisper_generic_prompt_ids(*cm, params, max_prev_cap, eos_id, prompt_text_ids);
+        if (const transcribe_status st = whisper_generic_prompt_ids(*cm, params, prompt_cap, eos_id, prompt_text_ids);
             st != TRANSCRIBE_OK) {
             return st;
-        }
-    }
-
-    // Transcript prefix (openai DecodingOptions.prefix): " " + strip(prefix)
-    // right after the SOT sequence, on the first window only. It sits in the
-    // prompt, so the timestamp rules (which read generated_ids) begin after
-    // it and the result text holds only the continuation; raw_text leads
-    // with it.
-    std::vector<int32_t> prefix_ids;
-    if (params != nullptr && params->prefix != nullptr) {
-        std::string p = params->prefix;
-        size_t      a = 0, b = p.size();
-        while (a < b && std::isspace(static_cast<unsigned char>(p[a]))) {
-            ++a;
-        }
-        while (b > a && std::isspace(static_cast<unsigned char>(p[b - 1]))) {
-            --b;
-        }
-        if (b > a) {
-            if (const transcribe_status st =
-                    transcribe::prompting::encode_plain(cm->tok, " " + p.substr(a, b - a), prefix_ids, "prefix");
-                st != TRANSCRIBE_OK) {
-                return st;
-            }
-            for (int32_t id : prefix_ids) {
-                if (id >= eos_id) {
-                    log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "whisper run: prefix encodes to special token id %d", id);
-                    return TRANSCRIBE_ERR_INVALID_ARG;
-                }
-            }
-            all_raw_ids.insert(all_raw_ids.end(), prefix_ids.begin(), prefix_ids.end());
         }
     }
 
@@ -2724,10 +2732,9 @@ transcribe_status whisper_run_batch(transcribe_session *          session,
                                             (wp->initial_prompt != nullptr && wp->initial_prompt[0] != '\0');
     std::vector<int32_t> prev_tokens;
     if (whisper_has_generic_prompt(params)) {
-        const int max_prev_cap =
-            wp->max_prev_context_tokens > 0 ? wp->max_prev_context_tokens : (hp.dec_max_target_positions / 2 - 1);
         std::vector<int32_t> ptext;
-        if (prev_sot_id < 0 || whisper_generic_prompt_ids(*cm, params, max_prev_cap, eos_id, ptext) != TRANSCRIBE_OK) {
+        if (prev_sot_id < 0 ||
+            whisper_generic_prompt_ids(*cm, params, whisper_prev_cap(*wp, hp), eos_id, ptext) != TRANSCRIBE_OK) {
             return whisper_run_batch_serial(cc, pcm, n_samples, n, params);
         }
         if (!ptext.empty()) {
@@ -2738,8 +2745,7 @@ transcribe_status whisper_run_batch(transcribe_session *          session,
         if (prev_sot_id < 0) {
             return whisper_run_batch_serial(cc, pcm, n_samples, n, params);
         }
-        const int max_prev_cap =
-            wp->max_prev_context_tokens > 0 ? wp->max_prev_context_tokens : (hp.dec_max_target_positions / 2 - 1);
+        const int            max_prev_cap = whisper_prev_cap(*wp, hp);
         std::vector<int32_t> ptext;
         if (wp->prompt_tokens != nullptr && wp->n_prompt_tokens > 0) {
             if (wp->prompt_tokens[0] == prev_sot_id) {
@@ -3528,10 +3534,13 @@ static transcribe_status whisper_run_validate(const transcribe_session * ctx, co
         }
         const auto *         cm = static_cast<const WhisperModel *>(ctx->model);
         std::vector<int32_t> ids;
-        if (cm != nullptr && cm->tok.encode(std::string(" ") + params->prefix, ids) == TRANSCRIBE_OK &&
-            static_cast<int>(ids.size()) > cm->hparams.dec_max_target_positions / 2 - 1) {
+        if (const transcribe_status st = whisper_prefix_ids(*cm, params->prefix, ids); st != TRANSCRIBE_OK) {
+            return st;
+        }
+        const int limit = cm->hparams.dec_max_target_positions / 2 - 1;
+        if (static_cast<int>(ids.size()) > limit) {
             log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "whisper run: transcript prefix is %zu tokens; the limit is %d",
-                    ids.size(), cm->hparams.dec_max_target_positions / 2 - 1);
+                    ids.size(), limit);
             return TRANSCRIBE_ERR_INVALID_ARG;
         }
     }

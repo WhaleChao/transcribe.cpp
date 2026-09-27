@@ -265,13 +265,26 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
         }
         transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_DIARIZATION, diar);
     }
-    // Generic vocabulary as keyword-list biasing, on the variants whose model
-    // cards document it and where it was measured (build_granite_affixes).
-    // Transcript prefix: -plus's prefix_text (IBM model card; measured clean).
-    transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX, m->variant == "granite-speech-4.1-2b-plus");
-    transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_VOCABULARY,
-                            m->variant == "granite-4.0-1b-speech" || m->variant == "granite-speech-4.1-2b" ||
-                                m->variant == "granite-speech-4.1-2b-plus");
+    // Generic prompting, variant-scoped the same way: the converter writes
+    // stt.capability.vocabulary (keyword-list biasing, build_granite_affixes)
+    // and stt.capability.transcript_prefix (-plus's prefix_text) for the
+    // variants whose model cards document them. Absent keys mean unsupported.
+    {
+        bool vocabulary = false;
+        bool prefix     = false;
+        if (const transcribe_status st =
+                read_optional_bool_kv(loader.gguf(), "stt.capability.vocabulary", "granite", false, vocabulary);
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+        if (const transcribe_status st =
+                read_optional_bool_kv(loader.gguf(), "stt.capability.transcript_prefix", "granite", false, prefix);
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+        transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_VOCABULARY, vocabulary);
+        transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX, prefix);
+    }
 
     if (const transcribe_status st = read_languages_kv(loader.gguf(), *m); st != TRANSCRIBE_OK) {
         return st;
@@ -531,14 +544,23 @@ static int granite_predicted_tokens(const GraniteModel * cm, const transcribe_ru
     return granite_word_timestamps(cm, params) ? 3 * plain : plain;
 }
 
+// Token room for the vocabulary's keyword list alongside `n_audio` audio
+// tokens: what the context window leaves after the generation reserve and the
+// representative prompt overhead. run() passes its clip; run_batch() passes 0.
+static int granite_keyword_room(int ceiling, int n_audio) {
+    return ceiling - k_gen_reserve - n_audio - k_prompt_overhead_tokens;
+}
+
 // Build the prompt prefix/suffix token-id lists from the shared run params and
 // model variant (the audio tokens splice in between). Single source of truth
-// for run() and run_batch(). `keyword_room` bounds the vocabulary's tokens.
+// for run() and run_batch(). `keyword_room` bounds the vocabulary's tokens;
+// `n_keyword_tokens` (optional) receives how many the fitted list took.
 static transcribe_status build_granite_affixes(GraniteModel *                cm,
                                                const transcribe_run_params * params,
                                                int                           keyword_room,
                                                std::vector<int32_t> &        prefix_ids,
-                                               std::vector<int32_t> &        suffix_ids) {
+                                               std::vector<int32_t> &        suffix_ids,
+                                               size_t *                      n_keyword_tokens = nullptr) {
     const bool  is_plus  = cm->hparams.variant == "granite-speech-4.1-2b-plus";
     bool        asr_mode = true;  // plain transcription instruction (no task swap)
     std::string instruction;
@@ -617,9 +639,10 @@ static transcribe_status build_granite_affixes(GraniteModel *                cm,
                 if (is_plus && !translate) {
                     instruction = " Can you transcribe the speech into a written format?";
                 }
-                instruction +=
-                    " Keywords: " + transcribe::prompting::join(
-                                        std::vector<std::string>(terms.begin(), terms.begin() + fit.n_terms), ", ");
+                instruction += fit.terms_text;
+            }
+            if (n_keyword_tokens != nullptr) {
+                *n_keyword_tokens = fit.n_tokens();
             }
         }
     }
@@ -674,11 +697,12 @@ static transcribe_status build_granite_affixes(GraniteModel *                cm,
         suffix_ids.insert(suffix_ids.end(), asst_ids.begin(), asst_ids.end());
         suffix_ids.push_back(cm->chat_tokens.end_of_role);
 
-        // Transcript prefix (-plus, IBM's prefix_text): the assistant turn
+        // Transcript prefix (IBM's prefix_text; the dispatcher passes one only
+        // when stt.capability.transcript_prefix is set): the assistant turn
         // opens with it verbatim. Its composition with the word-timestamp and
         // speaker-attribution tasks is untested, so those reject it.
         if (params != nullptr && params->prefix != nullptr) {
-            if (!is_plus || !asr_mode) {
+            if (!asr_mode) {
                 log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
                         "granite: a transcript prefix is supported in plain transcription only (not word timestamps "
                         "or speaker attribution)");
@@ -1098,9 +1122,8 @@ transcribe_status run(transcribe_session *          ctx_base,
     std::vector<int32_t> suffix_ids;
     const int            n_audio_tokens = cc->n_audio_tokens;
     const int            ceiling        = granite_context_ceiling(cc->n_ctx, cm->hparams);
-    if (const transcribe_status st = build_granite_affixes(
-            cm, params, std::max(ceiling - k_gen_reserve - n_audio_tokens - k_prompt_overhead_tokens, 0), prefix_ids,
-            suffix_ids);
+    if (const transcribe_status st =
+            build_granite_affixes(cm, params, granite_keyword_room(ceiling, n_audio_tokens), prefix_ids, suffix_ids);
         st != TRANSCRIBE_OK) {
         return st;
     }
@@ -1120,7 +1143,7 @@ transcribe_status run(transcribe_session *          ctx_base,
         input_ids.push_back(0);
     }
     input_ids.insert(input_ids.end(), suffix_ids.begin(), suffix_ids.end());
-    {
+    if (transcribe::prompting::dump_enabled()) {
         std::vector<int32_t> rendered = input_ids;
         std::fill(rendered.begin() + prefix_len, rendered.begin() + prefix_len + n_audio_tokens,
                   cm->hparams.audio_token_id);
@@ -1138,8 +1161,8 @@ transcribe_status run(transcribe_session *          ctx_base,
         transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
                             "granite run: input too long — %d audio + %d prompt tokens leave "
                             "no room for output within the %d-token context (need %d). "
-                            "Shorten the audio (see transcribe_capabilities.max_audio_ms) or "
-                            "split it into segments.",
+                            "Shorten the audio (see transcribe_capabilities.max_audio_ms), "
+                            "split it into segments, or shorten the transcript prefix.",
                             n_audio_tokens, prefix_len + suffix_len, ceiling, T_prompt + k_gen_reserve);
         return TRANSCRIBE_ERR_INPUT_TOO_LONG;
     }
@@ -1622,13 +1645,14 @@ transcribe_status run_batch(transcribe_session *          session,
     transcribe::debug::init();
     const auto & hp = cm->hparams;
 
-    // Shared prompt affixes (one run_params across the batch). The keyword
-    // budget ignores audio here; a clip that then does not fit is that row's
-    // INPUT_TOO_LONG, as without a vocabulary.
+    // Shared prompt affixes (one run_params across the batch), with the
+    // keyword list fitted as if there were no audio. A row whose own room is
+    // smaller than that fit would get fewer keywords from run(), so the batch
+    // then goes serial (see fit_terms_and_context: otherwise the fits match).
     std::vector<int32_t> prefix_ids, suffix_ids;
-    if (build_granite_affixes(
-            cm, params, std::max(granite_context_ceiling(cc->n_ctx, hp) - k_gen_reserve - k_prompt_overhead_tokens, 0),
-            prefix_ids, suffix_ids) != TRANSCRIBE_OK) {
+    size_t               n_keyword_tokens = 0;
+    if (build_granite_affixes(cm, params, granite_keyword_room(granite_context_ceiling(cc->n_ctx, hp), 0), prefix_ids,
+                              suffix_ids, &n_keyword_tokens) != TRANSCRIBE_OK) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
     const int prefix_len = static_cast<int>(prefix_ids.size());
@@ -1686,6 +1710,9 @@ transcribe_status run_batch(transcribe_session *          session,
         }
         if (n_audio[b] <= 0) {
             continue;
+        }
+        if (n_keyword_tokens > static_cast<size_t>(std::max(granite_keyword_room(ceiling, n_audio[b]), 0))) {
+            return run_batch_serial(cc, pcm, n_samples, n, params);
         }
         prompt_ids[b] = prefix_ids;
         for (int i = 0; i < n_audio[b]; ++i) {
