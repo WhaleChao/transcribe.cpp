@@ -408,33 +408,47 @@ transcribe_status validate_run_params_common(const transcribe_session * session,
 // Soft inputs a model ignores are removed later by strip_ignored_prompting;
 // everything here is a caller error that must preserve the prior snapshot.
 transcribe_status validate_prompting(const transcribe_model * model, const transcribe_run_params * params) {
+    auto reject = [](transcribe_status st, const char * why) {
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "transcribe_run: %s", why);
+        return st;
+    };
     if (params->n_vocabulary < 0 || (params->n_vocabulary > 0 && params->vocabulary == nullptr)) {
-        return TRANSCRIBE_ERR_INVALID_ARG;
+        return reject(TRANSCRIBE_ERR_INVALID_ARG, "vocabulary is NULL or n_vocabulary is negative");
     }
     for (int32_t i = 0; i < params->n_vocabulary; ++i) {
         if (params->vocabulary[i] == nullptr) {
-            return TRANSCRIBE_ERR_INVALID_ARG;
+            return reject(TRANSCRIBE_ERR_INVALID_ARG, "vocabulary has a NULL entry");
         }
     }
     const bool has_prefix = transcribe::prompting::has_text(params->prefix);
     if (params->task == TRANSCRIBE_TASK_INSTRUCT) {
         if (!transcribe::has_feature(model, TRANSCRIBE_FEATURE_INSTRUCT)) {
-            return TRANSCRIBE_ERR_UNSUPPORTED_TASK;
+            return reject(TRANSCRIBE_ERR_UNSUPPORTED_TASK,
+                          "this model does not support TRANSCRIBE_TASK_INSTRUCT (TRANSCRIBE_FEATURE_INSTRUCT)");
         }
         // The instruction defines the task; there is nothing to run without
         // it. Output is free text, so there is no target language and no
         // alignment to return. Prefix-as-answer-prefill is untested on
         // every INSTRUCT family, so it is rejected until one measures it.
-        if (!transcribe::prompting::has_text(params->prompt) || params->target_language != nullptr ||
-            (params->timestamps != TRANSCRIBE_TIMESTAMPS_NONE && params->timestamps != TRANSCRIBE_TIMESTAMPS_AUTO) ||
-            has_prefix) {
-            return TRANSCRIBE_ERR_INVALID_ARG;
+        if (!transcribe::prompting::has_text(params->prompt)) {
+            return reject(TRANSCRIBE_ERR_INVALID_ARG, "TRANSCRIBE_TASK_INSTRUCT requires a non-empty prompt");
+        }
+        if (params->target_language != nullptr) {
+            return reject(TRANSCRIBE_ERR_INVALID_ARG, "TRANSCRIBE_TASK_INSTRUCT does not take a target_language");
+        }
+        if (params->timestamps != TRANSCRIBE_TIMESTAMPS_NONE && params->timestamps != TRANSCRIBE_TIMESTAMPS_AUTO) {
+            return reject(TRANSCRIBE_ERR_INVALID_ARG, "TRANSCRIBE_TASK_INSTRUCT supports timestamps NONE or AUTO only");
+        }
+        if (has_prefix) {
+            return reject(TRANSCRIBE_ERR_INVALID_ARG,
+                          "a transcript prefix is not supported with TRANSCRIBE_TASK_INSTRUCT");
         }
     }
     // Ignoring a prefix would make the output repeat the prefix's words and
     // silently break callers that stitch text together, so it is a hard gate.
     if (has_prefix && !transcribe::has_feature(model, TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX)) {
-        return TRANSCRIBE_ERR_INVALID_ARG;
+        return reject(TRANSCRIBE_ERR_INVALID_ARG,
+                      "this model does not support a transcript prefix (TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX)");
     }
     return TRANSCRIBE_OK;
 }
@@ -1885,6 +1899,9 @@ static transcribe_status transcribe_stream_begin_impl(struct transcribe_session 
     // A prefix is forced decoder text for one utterance's opening; a stream
     // has no fixed opening to force it onto.
     if (transcribe::prompting::has_text(run_params->prefix)) {
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                            "transcribe_stream_begin: a transcript prefix is not accepted "
+                            "for streaming");
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
 
@@ -2436,6 +2453,9 @@ static transcribe_status transcribe_run_batch_impl(struct transcribe_session *  
     // One shared params across different audio: a transcript prefix can
     // only describe one of them.
     if (transcribe::prompting::has_text(params->prefix)) {
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                            "transcribe_run_batch: a transcript prefix is per-utterance "
+                            "and is not accepted in a batch");
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
 
