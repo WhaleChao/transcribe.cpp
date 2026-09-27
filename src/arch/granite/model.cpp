@@ -19,6 +19,7 @@
 #include "transcribe-log.h"
 #include "transcribe-mel.h"
 #include "transcribe-meta.h"
+#include "transcribe-prompting.h"
 #include "transcribe-repetition-guard.h"
 #include "weights.h"
 
@@ -83,7 +84,9 @@ constexpr float      kBnEps              = 1e-5f;
 // rather than silently aliasing RoPE past the trained range.
 
 // Generation reserve: what the input gate keeps free, and the decode-budget floor.
-constexpr int k_gen_reserve = 256;
+constexpr int k_gen_reserve            = 256;
+// Representative non-audio prompt overhead (chat affixes); advisory.
+constexpr int k_prompt_overhead_tokens = 64;
 
 // Effective decoder context ceiling, in tokens: the model's trained maximum,
 // optionally lowered — never raised — by the caller's session n_ctx knob.
@@ -117,9 +120,7 @@ int64_t granite_max_audio_ms(const GraniteHParams & hp) {
         hp.dec_max_position_embeddings <= 0) {
         return 0;
     }
-    // Representative non-audio prompt overhead (chat affixes); advisory.
-    constexpr int k_prompt_overhead = 64;
-    const int     max_audio_tokens  = hp.dec_max_position_embeddings - k_prompt_overhead - k_gen_reserve;
+    const int max_audio_tokens = hp.dec_max_position_embeddings - k_prompt_overhead_tokens - k_gen_reserve;
     if (max_audio_tokens <= 0) {
         return 0;
     }
@@ -264,6 +265,11 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
         }
         transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_DIARIZATION, diar);
     }
+    // Generic vocabulary as keyword-list biasing, on the variants whose model
+    // cards document it and where it was measured (build_granite_affixes).
+    transcribe::set_feature(m.get(), TRANSCRIBE_FEATURE_VOCABULARY,
+                            m->variant == "granite-4.0-1b-speech" || m->variant == "granite-speech-4.1-2b" ||
+                                m->variant == "granite-speech-4.1-2b-plus");
 
     if (const transcribe_status st = read_languages_kv(loader.gguf(), *m); st != TRANSCRIBE_OK) {
         return st;
@@ -305,7 +311,7 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
             m->hparams.fe_sample_rate > 0 && m->hparams.dec_max_position_embeddings > 0) {
             m->limits.has_context_cap    = true;
             m->limits.model_max_ctx      = m->hparams.dec_max_position_embeddings;
-            m->limits.prompt_overhead    = 64;  // match granite_max_audio_ms's k_prompt_overhead
+            m->limits.prompt_overhead    = k_prompt_overhead_tokens;
             m->limits.gen_reserve        = k_gen_reserve;
             // ms per audio token: granite emits num_queries tokens per
             // window_size encoder frames; t_enc = mel_frames/2;
@@ -510,11 +516,14 @@ static const char * granite_target_language_name(const char * code_or_name) {
 
 // Build the prompt prefix/suffix token-id lists from the shared run params and
 // model variant (the audio tokens splice in between). Single source of truth
-// for run() and run_batch().
+// for run() and run_batch(). `keyword_room` bounds the vocabulary's tokens.
 static transcribe_status build_granite_affixes(GraniteModel *                cm,
                                                const transcribe_run_params * params,
+                                               int                           keyword_room,
                                                std::vector<int32_t> &        prefix_ids,
                                                std::vector<int32_t> &        suffix_ids) {
+    const bool  is_plus  = cm->hparams.variant == "granite-speech-4.1-2b-plus";
+    bool        asr_mode = true;  // plain transcription instruction (no task swap)
     std::string instruction;
     if (cm->hparams.variant == "granite-speech-4.1-2b") {
         instruction = "transcribe the speech with proper punctuation and capitalization.";
@@ -536,6 +545,7 @@ static transcribe_status build_granite_affixes(GraniteModel *                cm,
                 return TRANSCRIBE_ERR_INVALID_ARG;
             }
             instruction = std::string("translate the speech to ") + lang_name + ".";
+            asr_mode    = false;
         } else if (params->timestamps == TRANSCRIBE_TIMESTAMPS_WORD) {
             // -plus only (1b/2b advertise NONE, gated out upstream). AUTO does
             // NOT request timestamps. IBM's verbatim prompt; the model emits
@@ -551,23 +561,60 @@ static transcribe_status build_granite_affixes(GraniteModel *                cm,
             instruction =
                 " Timestamps: Transcribe the speech. After each word, add a timestamp tag "
                 "showing the end time in centiseconds, e.g. hello [T:45] world [T:82]";
+            asr_mode = false;
         } else if (diarize_requested(cm, params)) {
             // -plus only (the DIARIZATION feature bit gates this). IBM's
             // verbatim speaker-attribution instruction; the model emits
             // "[Speaker N]:" tags before turns (split after decode).
             instruction = k_saa_instruction;
+            asr_mode    = false;
+        }
+    }
+
+    // Generic vocabulary as IBM's keyword-list biasing: " Keywords: {terms}"
+    // (", ") appended to the instruction. On -plus the documented KWB form of
+    // the ASR instruction is capitalized ("Can you ..."). Translate + keywords
+    // is IBM-documented for 4.1 and measured usable there; granite-4.0 drops
+    // the translation for most inputs when keywords are added, and keywords
+    // with -plus timestamps / speaker attribution are untested, so those
+    // combinations ignore the vocabulary.
+    if (const std::vector<std::string> terms = transcribe::prompting::terms(params); !terms.empty()) {
+        const bool translate = params->task == TRANSCRIBE_TASK_TRANSLATE;
+        if (translate && cm->hparams.variant != "granite-speech-4.1-2b") {
+            log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+                    "granite: vocabulary is not supported with translation on this variant; ignoring %zu term(s)",
+                    terms.size());
+        } else if (!translate && !asr_mode) {
+            log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+                    "granite: vocabulary applies to plain transcription only (not word timestamps or speaker "
+                    "attribution); ignoring %zu term(s)",
+                    terms.size());
+        } else {
+            transcribe::prompting::FittedPrompt fit;
+            if (const transcribe_status st = transcribe::prompting::fit_terms_and_context(
+                    cm->tok, terms, { " Keywords: ", ", ", "" }, "", keyword_room, "granite", fit);
+                st != TRANSCRIBE_OK) {
+                return st;
+            }
+            if (fit.n_terms > 0) {
+                if (is_plus && !translate) {
+                    instruction = " Can you transcribe the speech into a written format?";
+                }
+                instruction +=
+                    " Keywords: " + transcribe::prompting::join(
+                                        std::vector<std::string>(terms.begin(), terms.begin() + fit.n_terms), ", ");
+            }
         }
     }
 
     const bool use_granite4_chat = cm->chat_template.find("<|start_of_role|>") != std::string::npos &&
                                    cm->chat_tokens.start_of_role >= 0 && cm->chat_tokens.end_of_role >= 0;
     if (use_granite4_chat) {
-        const char *         system_content = (cm->hparams.variant == "granite-speech-4.1-2b-plus") ?
-                                                  "Knowledge Cutoff Date: April 2024.\n"
-                                                  "Today's Date: December 19, 2024.\n"
-                                                  "You are Granite, developed by IBM. You are a helpful AI assistant" :
-                                                  "You are a helpful assistant. Please ensure responses "
-                                                  "are professional, accurate, and safe.";
+        const char * system_content = is_plus ? "Knowledge Cutoff Date: April 2024.\n"
+                                                "Today's Date: December 19, 2024.\n"
+                                                "You are Granite, developed by IBM. You are a helpful AI assistant" :
+                                                "You are a helpful assistant. Please ensure responses "
+                                                "are professional, accurate, and safe.";
         std::vector<int32_t> text_a, text_b;
         if (const transcribe_status st = cm->tok.encode("system", text_a); st != TRANSCRIBE_OK) {
             return st;
@@ -1013,14 +1060,17 @@ transcribe_status run(transcribe_session *          ctx_base,
     //   translate task                   : "translate the speech to <Language>." (IBM model card)
     std::vector<int32_t> prefix_ids;
     std::vector<int32_t> suffix_ids;
-    if (const transcribe_status st = build_granite_affixes(cm, params, prefix_ids, suffix_ids); st != TRANSCRIBE_OK) {
+    const int            n_audio_tokens = cc->n_audio_tokens;
+    const int            ceiling        = granite_context_ceiling(cc->n_ctx, cm->hparams);
+    if (const transcribe_status st = build_granite_affixes(
+            cm, params, ceiling - k_gen_reserve - n_audio_tokens - k_prompt_overhead_tokens, prefix_ids, suffix_ids);
+        st != TRANSCRIBE_OK) {
         return st;
     }
 
-    const int n_audio_tokens = cc->n_audio_tokens;
-    const int prefix_len     = static_cast<int>(prefix_ids.size());
-    const int suffix_len     = static_cast<int>(suffix_ids.size());
-    const int T_prompt       = prefix_len + n_audio_tokens + suffix_len;
+    const int prefix_len = static_cast<int>(prefix_ids.size());
+    const int suffix_len = static_cast<int>(suffix_ids.size());
+    const int T_prompt   = prefix_len + n_audio_tokens + suffix_len;
 
     // Reference quirk: HF replaces audio_token_id with 0 before the
     // embed_tokens lookup (those rows are overwritten by the audio scatter
@@ -1033,6 +1083,12 @@ transcribe_status run(transcribe_session *          ctx_base,
         input_ids.push_back(0);
     }
     input_ids.insert(input_ids.end(), suffix_ids.begin(), suffix_ids.end());
+    {
+        std::vector<int32_t> rendered = input_ids;
+        std::fill(rendered.begin() + prefix_len, rendered.begin() + prefix_len + n_audio_tokens,
+                  cm->hparams.audio_token_id);
+        transcribe::prompting::dump_rendered(cm->tok, rendered, cm->hparams.audio_token_id, "granite");
+    }
 
     // Input-length gate. The decoder context window is the binding limit:
     // audio tokens + prompt + generation must fit dec_max_position_embeddings
@@ -1041,7 +1097,6 @@ transcribe_status run(transcribe_session *          ctx_base,
     // autoregressive decode, instead of growing the cache unboundedly and
     // aliasing RoPE past the trained range. Reserving the full generation
     // budget means an accepted clip always has room for a real transcript.
-    const int ceiling = granite_context_ceiling(cc->n_ctx, cm->hparams);
     if (T_prompt + k_gen_reserve > ceiling) {
         transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
                             "granite run: input too long — %d audio + %d prompt tokens leave "
@@ -1506,9 +1561,13 @@ transcribe_status run_batch(transcribe_session *          session,
     transcribe::debug::init();
     const auto & hp = cm->hparams;
 
-    // Shared prompt affixes (one run_params across the batch).
+    // Shared prompt affixes (one run_params across the batch). The keyword
+    // budget ignores audio here; a clip that then does not fit is that row's
+    // INPUT_TOO_LONG, as without a vocabulary.
     std::vector<int32_t> prefix_ids, suffix_ids;
-    if (build_granite_affixes(cm, params, prefix_ids, suffix_ids) != TRANSCRIBE_OK) {
+    if (build_granite_affixes(cm, params,
+                              granite_context_ceiling(cc->n_ctx, hp) - k_gen_reserve - k_prompt_overhead_tokens,
+                              prefix_ids, suffix_ids) != TRANSCRIBE_OK) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
     const int prefix_len = static_cast<int>(prefix_ids.size());
