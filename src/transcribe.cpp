@@ -26,6 +26,7 @@
 #include "transcribe-log.h"
 #include "transcribe-model.h"
 #include "transcribe-path.h"
+#include "transcribe-prompting.h"
 #include "transcribe-session.h"
 #include "transcribe-tokenizer.h"
 #include "transcribe/whisper.h"
@@ -300,6 +301,8 @@ int timestamp_rank(transcribe_timestamp_kind k) {
 // rejection differs between the two (run mirrors supports_translate,
 // streaming-begin rejects unconditionally in v1), so each caller
 // applies its own translate check before reaching this helper.
+transcribe_status validate_prompting(const transcribe_model * model, const transcribe_run_params * params);
+
 transcribe_status validate_run_params_common(const transcribe_session * session, const transcribe_run_params * params) {
     // Raw-validate every enum field before its first enum-typed load (see
     // enum_field_raw). Once a field passes here, downstream typed reads —
@@ -307,6 +310,7 @@ transcribe_status validate_run_params_common(const transcribe_session * session,
     switch (enum_field_raw(&params->task)) {
         case TRANSCRIBE_TASK_TRANSCRIBE:
         case TRANSCRIBE_TASK_TRANSLATE:
+        case TRANSCRIBE_TASK_INSTRUCT:
             break;
         default:
             return TRANSCRIBE_ERR_INVALID_ARG;
@@ -396,7 +400,86 @@ transcribe_status validate_run_params_common(const transcribe_session * session,
         !session->model->allows_translation_pair(params->language, params->target_language)) {
         return TRANSCRIBE_ERR_UNSUPPORTED_LANGUAGE;
     }
+    return validate_prompting(session->model, params);
+}
+
+// Shape and hard-gate checks for the generic prompting fields. `params` is
+// a normalized (full-size) view, so the trailing fields are always readable.
+// Soft inputs a model ignores are removed later by strip_ignored_prompting;
+// everything here is a caller error that must preserve the prior snapshot.
+transcribe_status validate_prompting(const transcribe_model * model, const transcribe_run_params * params) {
+    if (params->n_vocabulary < 0 || (params->n_vocabulary > 0 && params->vocabulary == nullptr)) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    for (int32_t i = 0; i < params->n_vocabulary; ++i) {
+        if (params->vocabulary[i] == nullptr) {
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+    }
+    const bool has_prefix = transcribe::prompting::has_text(params->prefix);
+    if (params->task == TRANSCRIBE_TASK_INSTRUCT) {
+        if (!transcribe::has_feature(model, TRANSCRIBE_FEATURE_INSTRUCT)) {
+            return TRANSCRIBE_ERR_UNSUPPORTED_TASK;
+        }
+        // The instruction defines the task; there is nothing to run without
+        // it. Output is free text, so there is no target language and no
+        // alignment to return. Prefix-as-answer-prefill is untested on
+        // every INSTRUCT family, so it is rejected until one measures it.
+        if (!transcribe::prompting::has_text(params->prompt) || params->target_language != nullptr ||
+            (params->timestamps != TRANSCRIBE_TIMESTAMPS_NONE && params->timestamps != TRANSCRIBE_TIMESTAMPS_AUTO) ||
+            has_prefix) {
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
+    }
+    // Ignoring a prefix would make the output repeat the prefix's words and
+    // silently break callers that stitch text together, so it is a hard gate.
+    if (has_prefix && !transcribe::has_feature(model, TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX)) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
     return TRANSCRIBE_OK;
+}
+
+// Full-size copy of a caller's run params: defaults first, then only the
+// prefix the caller's struct_size covers, so every trailing field is
+// readable (NULL/0 for an older caller). struct_size is preserved so
+// has_field() gating still sees the caller's true layout. Idempotent.
+void normalize_run_params(const transcribe_run_params * in, transcribe_run_params * out) {
+    transcribe_run_params_init(out);
+    std::memcpy(out, in, static_cast<size_t>(std::min<uint64_t>(in->struct_size, sizeof(*out))));
+}
+
+// Warn about, then remove, the soft prompting inputs this model ignores, so
+// a family only ever sees inputs it should act on. Runs on a validated
+// normalized view. Idempotent: a stripped view warns nothing the second time
+// (the batch serial fallback re-enters run_one_inner per utterance).
+void strip_ignored_prompting(const transcribe_model * model, transcribe_run_params * params) {
+    const char * arch_name = (model->arch != nullptr && model->arch->name != nullptr) ? model->arch->name : "(unknown)";
+    const bool   instruct  = params->task == TRANSCRIBE_TASK_INSTRUCT;
+    const bool   has_v     = transcribe::has_feature(model, TRANSCRIBE_FEATURE_VOCABULARY);
+    const bool   has_i     = transcribe::has_feature(model, TRANSCRIBE_FEATURE_INSTRUCT);
+    if (params->n_vocabulary > 0 && (!has_v || (instruct && !has_i))) {
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+                            "transcribe_run: model '%s' does not support vocabulary%s; ignoring %d term(s). Use "
+                            "transcribe_model_supports(model, TRANSCRIBE_FEATURE_VOCABULARY) to pre-check.",
+                            arch_name, (has_v && instruct) ? " under INSTRUCT" : "", params->n_vocabulary);
+        params->vocabulary   = nullptr;
+        params->n_vocabulary = 0;
+    }
+    if (!instruct && transcribe::prompting::has_text(params->prompt) &&
+        !transcribe::has_feature(model, TRANSCRIBE_FEATURE_CONTEXT_PROMPT)) {
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+                            "transcribe_run: model '%s' has no context-prompt slot; ignoring prompt. Use "
+                            "transcribe_model_supports(model, TRANSCRIBE_FEATURE_CONTEXT_PROMPT) to pre-check, or "
+                            "TRANSCRIBE_TASK_INSTRUCT on models with TRANSCRIBE_FEATURE_INSTRUCT.",
+                            arch_name);
+        params->prompt = nullptr;
+    }
+    if (!transcribe::prompting::has_text(params->prompt)) {
+        params->prompt = nullptr;
+    }
+    if (!transcribe::prompting::has_text(params->prefix)) {
+        params->prefix = nullptr;
+    }
 }
 
 }  // namespace
@@ -1738,6 +1821,11 @@ static transcribe_status transcribe_stream_begin_impl(struct transcribe_session 
     if (const auto st = check_input_struct_size(run_params->struct_size, k_min_run_params_size); st != TRANSCRIBE_OK) {
         return st;
     }
+    // Full-size view (see normalize_run_params); the family hook gets a
+    // further copy whose strings the library owns, built below.
+    struct transcribe_run_params run_params_view;
+    normalize_run_params(run_params, &run_params_view);
+    run_params = &run_params_view;
     if (const auto st = check_input_struct_size(stream_params->struct_size, k_min_stream_params_size);
         st != TRANSCRIBE_OK) {
         return st;
@@ -1791,8 +1879,13 @@ static transcribe_status transcribe_stream_begin_impl(struct transcribe_session 
     // family that supports streaming translate would loosen this in
     // its stream_begin hook, but the central dispatcher refuses
     // upfront so partially-wired callers fail fast.
-    if (run_params->task == TRANSCRIBE_TASK_TRANSLATE) {
+    if (run_params->task == TRANSCRIBE_TASK_TRANSLATE || run_params->task == TRANSCRIBE_TASK_INSTRUCT) {
         return TRANSCRIBE_ERR_UNSUPPORTED_TASK;
+    }
+    // A prefix is forced decoder text for one utterance's opening; a stream
+    // has no fixed opening to force it onto.
+    if (transcribe::prompting::has_text(run_params->prefix)) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
     }
 
     if (stream_params->family != nullptr) {
@@ -1810,6 +1903,7 @@ static transcribe_status transcribe_stream_begin_impl(struct transcribe_session 
     // clear_result so the pre-hook "snapshot preserved on rejection"
     // contract is undisturbed.
     warn_unsupported_advisory(session->model, run_params);
+    strip_ignored_prompting(session->model, &run_params_view);
 
     // Optional family preflight: validates extension field values
     // (e.g. parakeet's (L, C, R) menu) without mutating state. On
@@ -1845,21 +1939,27 @@ static transcribe_status transcribe_stream_begin_impl(struct transcribe_session 
     // wants a run-slot ext at stream begin must plumb it deliberately.
     session->stream_language_owned        = run_params->language != nullptr ? run_params->language : "";
     session->stream_target_language_owned = run_params->target_language != nullptr ? run_params->target_language : "";
-    // PREFIX copy, not struct assignment: the size gate above admits any
-    // struct_size >= k_min_run_params_size, so a conforming caller's
-    // allocation may be SHORTER than sizeof (fields past `family`, e.g.
-    // spec_k_drafts, absent). Init first so bytes past the caller's
-    // prefix hold their documented defaults, then copy only what the
-    // caller owns. The caller's struct_size is preserved by the copy, so
-    // downstream has_field() gating still sees the caller's true layout.
-    struct transcribe_run_params run_params_owned;
-    transcribe_run_params_init(&run_params_owned);
-    std::memcpy(&run_params_owned, run_params,
-                static_cast<size_t>(std::min<uint64_t>(run_params->struct_size, sizeof(run_params_owned))));
+    // Copied from the normalized view (never the caller's struct, whose
+    // allocation may end before the trailing fields); the view keeps the
+    // caller's struct_size, so has_field() gating still sees its layout.
+    struct transcribe_run_params run_params_owned = run_params_view;
     run_params_owned.language = run_params->language != nullptr ? session->stream_language_owned.c_str() : nullptr;
     run_params_owned.target_language =
         run_params->target_language != nullptr ? session->stream_target_language_owned.c_str() : nullptr;
-    run_params_owned.family = nullptr;
+    run_params_owned.family          = nullptr;
+    // Generic prompting strings, same ownership rule. Only non-empty terms
+    // are kept, so the view's count matches the owned array.
+    session->stream_vocabulary_owned = transcribe::prompting::terms(run_params);
+    session->stream_vocabulary_ptrs.clear();
+    for (const std::string & term : session->stream_vocabulary_owned) {
+        session->stream_vocabulary_ptrs.push_back(term.c_str());
+    }
+    session->stream_prompt_owned = run_params->prompt != nullptr ? run_params->prompt : "";
+    run_params_owned.vocabulary =
+        session->stream_vocabulary_ptrs.empty() ? nullptr : session->stream_vocabulary_ptrs.data();
+    run_params_owned.n_vocabulary = static_cast<int32_t>(session->stream_vocabulary_ptrs.size());
+    run_params_owned.prompt       = run_params->prompt != nullptr ? session->stream_prompt_owned.c_str() : nullptr;
+    run_params_owned.prefix       = nullptr;
 
     const transcribe_status st = session->model->arch->stream_begin(session, &run_params_owned, stream_params);
     if (st != TRANSCRIBE_OK) {
@@ -2130,6 +2230,12 @@ static transcribe_status run_one_inner(struct transcribe_session *          sess
     if (const auto st = check_input_struct_size(params->struct_size, k_min_run_params_size); st != TRANSCRIBE_OK) {
         return st;
     }
+    // Everything downstream reads this full-size view, never the caller's
+    // struct: an older caller's allocation may end before the prompting
+    // fields. Strings stay caller-owned; the call is synchronous.
+    struct transcribe_run_params params_view;
+    normalize_run_params(params, &params_view);
+    params = &params_view;
     // A run cannot replace an active stream's results — that would
     // strand the in-flight stream's per-family state. Caller must
     // finalize or reset first. FINISHED and FAILED both fall through;
@@ -2179,6 +2285,7 @@ static transcribe_status run_one_inner(struct transcribe_session *          sess
         if (params->task == TRANSCRIBE_TASK_TRANSLATE && !session->model->caps.supports_translate) {
             return TRANSCRIBE_ERR_UNSUPPORTED_TASK;
         }
+        strip_ignored_prompting(session->model, &params_view);
 
         // Family run-ext validation (the _RUN analogue of stream_validate),
         // the final pre-clear gate. Runs AFTER the run-param checks above,
@@ -2320,7 +2427,15 @@ static transcribe_status transcribe_run_batch_impl(struct transcribe_session *  
     if (const auto st = check_input_struct_size(params->struct_size, k_min_run_params_size); st != TRANSCRIBE_OK) {
         return st;
     }
+    struct transcribe_run_params params_view;
+    normalize_run_params(params, &params_view);
+    params = &params_view;
     if (session->stream_state == TRANSCRIBE_STREAM_ACTIVE) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    // One shared params across different audio: a transcript prefix can
+    // only describe one of them.
+    if (transcribe::prompting::has_text(params->prefix)) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
 
@@ -2344,6 +2459,7 @@ static transcribe_status transcribe_run_batch_impl(struct transcribe_session *  
         if (params->task == TRANSCRIBE_TASK_TRANSLATE && !session->model->caps.supports_translate) {
             return TRANSCRIBE_ERR_UNSUPPORTED_TASK;
         }
+        strip_ignored_prompting(session->model, &params_view);
         if (session->model->arch != nullptr && session->model->arch->run_validate != nullptr) {
             if (const transcribe_status st = session->model->arch->run_validate(session, params); st != TRANSCRIBE_OK) {
                 return st;

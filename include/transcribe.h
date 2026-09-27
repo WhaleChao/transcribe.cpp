@@ -446,9 +446,16 @@ TRANSCRIBE_API void transcribe_log_set(transcribe_log_callback cb, void * userda
 /* Task / timestamps                                                       */
 /* ----------------------------------------------------------------------- */
 
+/*
+ * INSTRUCT: transcribe_run_params::prompt replaces the model's task
+ * instruction and the output is free text (only full_text / raw_text are
+ * guaranteed). Gated by TRANSCRIBE_FEATURE_INSTRUCT; offline only. See
+ * transcribe_run_params for the full contract.
+ */
 typedef enum {
     TRANSCRIBE_TASK_TRANSCRIBE = 0,
     TRANSCRIBE_TASK_TRANSLATE  = 1,
+    TRANSCRIBE_TASK_INSTRUCT   = 2,
 } transcribe_task;
 
 /*
@@ -1038,8 +1045,9 @@ TRANSCRIBE_API void transcribe_session_params_init(struct transcribe_session_par
  * caller-declared input rate, at which point TRANSCRIBE_ERR_SAMPLE_RATE
  * (currently reserved) will become observable.
  *
- * task:        TRANSCRIBE or TRANSLATE. The model must declare support
- *              for translate via its capabilities; otherwise the run
+ * task:        TRANSCRIBE, TRANSLATE or INSTRUCT. The model must declare
+ *              support for translate via its capabilities, and for
+ *              INSTRUCT via TRANSCRIBE_FEATURE_INSTRUCT; otherwise the run
  *              returns TRANSCRIBE_ERR_UNSUPPORTED_TASK.
  *
  * timestamps:  requested granularity. Default params request AUTO,
@@ -1072,8 +1080,9 @@ TRANSCRIBE_API void transcribe_session_params_init(struct transcribe_session_par
  *
  * target_language: target language for translation tasks, or NULL.
  *
- * String-pointer lifetime (language / target_language): caller-owned, and
- * the library copies what it needs before the API call returns. This holds
+ * String-pointer lifetime (language / target_language / vocabulary /
+ * prompt / prefix): caller-owned, and the library copies what it needs
+ * before the API call returns. This holds
  * for transcribe_run / transcribe_run_batch (synchronous) AND for
  * transcribe_stream_begin: the dispatcher copies these strings into
  * session-owned storage at begin, so the caller may free its params —
@@ -1138,6 +1147,54 @@ struct transcribe_run_params {
      *   to know whether the field will take effect.
      */
     int32_t spec_k_drafts;
+
+    /*
+     * Generic prompting. All default to NULL / 0 (no prompting input).
+     * Probe transcribe_model_supports() for the matching feature bit; the
+     * bits describe where the text goes, not what the model does with it.
+     *
+     * vocabulary / n_vocabulary: custom terms, in priority order. The
+     *   library formats them for the family (TRANSCRIBE_FEATURE_VOCABULARY);
+     *   callers who want their own format leave this empty and put text in
+     *   `prompt`. Rendered terms precede `prompt` on models with a single
+     *   text slot. Without the feature, or under INSTRUCT on a model that
+     *   lacks VOCABULARY or INSTRUCT, the terms are ignored with a WARN.
+     *   When the family's prompt budget overflows, terms are dropped from
+     *   the end of the list with a WARN. n_vocabulary < 0, a NULL array
+     *   with n_vocabulary > 0, or a NULL entry is TRANSCRIBE_ERR_INVALID_ARG.
+     *   Empty terms are skipped.
+     *
+     * prompt: under TRANSCRIBE / TRANSLATE, context text placed verbatim in
+     *   the model's conditioning slot (TRANSCRIBE_FEATURE_CONTEXT_PROMPT);
+     *   without the feature it is ignored with a WARN, and on budget
+     *   overflow the most recent text is kept with a WARN. Under INSTRUCT,
+     *   the required instruction: NULL or empty is
+     *   TRANSCRIBE_ERR_INVALID_ARG, and one that does not fit the model's
+     *   budget is an error. The library never rewrites `prompt` and always
+     *   tokenizes it as plain text: control-token literals such as <|...|>
+     *   are rejected with TRANSCRIBE_ERR_INVALID_ARG.
+     *
+     * INSTRUCT additionally requires target_language == NULL and timestamps
+     * NONE or AUTO (TRANSCRIBE_ERR_INVALID_ARG otherwise), and is rejected
+     * by transcribe_stream_begin (TRANSCRIBE_ERR_UNSUPPORTED_TASK).
+     *
+     * prefix: transcript text the model continues from, as if it had already
+     *   emitted it (TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX). The audio must
+     *   contain the prefix's speech. full_text, segments and words hold only
+     *   the continuation, and timestamps start after the prefix; raw_text
+     *   holds prefix + continuation. For long-form families it applies to
+     *   the first window only. Unlike the soft inputs above, a non-empty
+     *   prefix is an error when unsupported (TRANSCRIBE_ERR_INVALID_ARG):
+     *   ignoring it would silently repeat the prefix's words. It is also
+     *   rejected under INSTRUCT, by transcribe_run_batch (one shared params
+     *   across different audio) and by transcribe_stream_begin.
+     *
+     * An empty-string prompt or prefix is treated as absent.
+     */
+    const char * const * vocabulary;
+    int32_t              n_vocabulary;
+    const char *         prompt;
+    const char *         prefix;
 };
 
 TRANSCRIBE_API void transcribe_run_params_init(struct transcribe_run_params * params);
@@ -1325,9 +1382,10 @@ TRANSCRIBE_API transcribe_status transcribe_model_get_capabilities(const struct 
  *
  * Feature meanings:
  *
- *   INITIAL_PROMPT       The model accepts a free-text or token
- *                        prompt to bias decoding. Today: whisper
- *                        only; reached via transcribe_whisper_run_ext.
+ *   INITIAL_PROMPT       The Whisper run extension's initial_prompt /
+ *                        prompt_tokens (transcribe_whisper_run_ext).
+ *                        For portable prompting use the generic
+ *                        fields and the four bits below.
  *
  *   TEMPERATURE_FALLBACK The model runs a multi-tier temperature loop
  *                        with metric-driven fallback. Today: whisper.
@@ -1366,6 +1424,24 @@ TRANSCRIBE_API transcribe_status transcribe_model_get_capabilities(const struct 
  *                        against a model where this returns false emits
  *                        a WARN and proceeds.
  *
+ *   VOCABULARY           transcribe_run_params::vocabulary is formatted
+ *                        for this model and reaches its prompt.
+ *
+ *   CONTEXT_PROMPT       transcribe_run_params::prompt reaches a
+ *                        transcription-conditioning slot verbatim under
+ *                        TRANSCRIBE / TRANSLATE. The effect depends on
+ *                        the model.
+ *
+ *   INSTRUCT             TRANSCRIBE_TASK_INSTRUCT is available:
+ *                        transcribe_run_params::prompt replaces the task
+ *                        instruction and the output is free text.
+ *
+ *   TRANSCRIPT_PREFIX    transcribe_run_params::prefix is honored as
+ *                        forced decoder text.
+ *
+ * The prompting bits are advertised only where the behavior is documented
+ * upstream or measured, not merely where the model accepts text.
+ *
  * Returns false on NULL model or unknown feature enum.
  */
 typedef enum {
@@ -1376,6 +1452,10 @@ typedef enum {
     TRANSCRIBE_FEATURE_PNC                  = 4,
     TRANSCRIBE_FEATURE_ITN                  = 5,
     TRANSCRIBE_FEATURE_DIARIZATION          = 6,
+    TRANSCRIBE_FEATURE_VOCABULARY           = 7,
+    TRANSCRIBE_FEATURE_CONTEXT_PROMPT       = 8,
+    TRANSCRIBE_FEATURE_INSTRUCT             = 9,
+    TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX    = 10,
 } transcribe_feature;
 
 TRANSCRIBE_API bool transcribe_model_supports(const struct transcribe_model * model, transcribe_feature feature);
