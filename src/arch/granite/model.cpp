@@ -535,7 +535,7 @@ static transcribe_status build_granite_affixes(GraniteModel *                cm,
                         params->target_language);
                 return TRANSCRIBE_ERR_INVALID_ARG;
             }
-            instruction = std::string("can you translate the speech into ") + lang_name + "?";
+            instruction = std::string("translate the speech to ") + lang_name + ".";
         } else if (params->timestamps == TRANSCRIBE_TIMESTAMPS_WORD) {
             // -plus only (1b/2b advertise NONE, gated out upstream). AUTO does
             // NOT request timestamps. IBM's verbatim prompt; the model emits
@@ -1010,7 +1010,7 @@ transcribe_status run(transcribe_session *          ctx_base,
     //                                       PLUS a Granite-specific system prompt (see use_granite4_chat below).
     //   word-timestamps task (-plus)     : IBM's verbatim timestamps prompt; the model emits
     //                                       per-word "[T:N]" centisecond markers (1b/2b: NONE).
-    //   translate task                   : "can you translate the speech into <Language>?"
+    //   translate task                   : "translate the speech to <Language>." (IBM model card)
     std::vector<int32_t> prefix_ids;
     std::vector<int32_t> suffix_ids;
     if (const transcribe_status st = build_granite_affixes(cm, params, prefix_ids, suffix_ids); st != TRANSCRIBE_OK) {
