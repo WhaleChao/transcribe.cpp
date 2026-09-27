@@ -27,7 +27,11 @@ English plus French, German, Spanish, and Portuguese (no Japanese on this
 variant). Takes a 16 kHz mono WAV and produces a transcript; with
 `--timestamps word` it returns per-word start/end times. Internally the model
 emits `[T:N]` end-of-word centisecond markers; the runtime parses them into
-structured word timestamps and returns a clean transcript.
+structured word timestamps and returns a clean transcript. The default
+`--timestamps auto` selects this task too (unless vocabulary, a prefix or
+speaker attribution is requested); its transcript is lowercase and
+unpunctuated and measured about 2 WER points worse than plain transcription,
+so pass `--timestamps none` when you only need the text.
 
 This variant is transcription-only. Unlike the base
 [`granite-speech-4.1-2b`](granite-speech-4.1-2b.md), it does not perform
