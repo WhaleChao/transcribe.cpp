@@ -43,3 +43,35 @@ def test_unsupported_prefix_raises(model_path, audio_pcm):
             pytest.skip("model supports a transcript prefix")
         with pytest.raises(t.InvalidArgument):
             session.run(audio_pcm, prefix="And so")
+
+
+def _whisper(model):
+    return model.arch == "whisper"
+
+
+def test_whisper_prefix_contract(model_path, audio_pcm):
+    """The prefix is forced decoder text: text holds only the continuation,
+    raw_text leads with the prefix, and nothing is duplicated."""
+    prefix = "And so my fellow Americans,"
+    with t.Model(model_path, backend="cpu") as model, model.session() as session:
+        if not _whisper(model):
+            pytest.skip("whisper-specific rendering")
+        assert model.supports("transcript_prefix")
+        res = session.run(audio_pcm, prefix=prefix)
+    assert res.raw_text.strip().startswith(prefix)
+    assert not res.text.lower().startswith("and so")
+    assert "ask not" in res.text.lower()
+
+
+def test_whisper_vocabulary_and_context(model_path, audio_pcm):
+    with t.Model(model_path, backend="cpu") as model, model.session() as session:
+        if not _whisper(model):
+            pytest.skip("whisper-specific rendering")
+        assert model.supports("vocabulary") and model.supports("context_prompt")
+        res = session.run(audio_pcm, vocabulary=["Kennedy", "Americans"],
+                          prompt="An inaugural address.")
+        assert "country" in res.text.lower()
+        # The whisper extension's prompt and the generic fields share one slot.
+        with pytest.raises(t.InvalidArgument):
+            session.run(audio_pcm, vocabulary=["Kennedy"],
+                        family=t.WhisperRunOptions(initial_prompt="x"))
