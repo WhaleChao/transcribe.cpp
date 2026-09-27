@@ -516,6 +516,21 @@ static const char * granite_target_language_name(const char * code_or_name) {
     return nullptr;
 }
 
+// Whether this run uses IBM's word-timestamps task (-plus only; other variants
+// advertise NONE): an explicit WORD request. AUTO does not request it.
+static bool granite_word_timestamps(const transcribe_model * m, const transcribe_run_params * params) {
+    return params != nullptr && m->caps.max_timestamp_kind == TRANSCRIBE_TIMESTAMPS_WORD &&
+           params->task == TRANSCRIBE_TASK_TRANSCRIBE && params->timestamps == TRANSCRIBE_TIMESTAMPS_WORD;
+}
+
+// Predicted transcript length for the decode budget. The word-timestamps task
+// follows every word with a "[T:N]" marker (about four more tokens), so it
+// gets three times the plain-text prediction; the budget is only a ceiling.
+static int granite_predicted_tokens(const GraniteModel * cm, const transcribe_run_params * params, int n_audio) {
+    const int plain = transcribe::predict_transcript_tokens(n_audio, cm->limits.ms_per_audio_token);
+    return granite_word_timestamps(cm, params) ? 3 * plain : plain;
+}
+
 // Build the prompt prefix/suffix token-id lists from the shared run params and
 // model variant (the audio tokens splice in between). Single source of truth
 // for run() and run_batch(). `keyword_room` bounds the vocabulary's tokens.
@@ -548,10 +563,10 @@ static transcribe_status build_granite_affixes(GraniteModel *                cm,
             }
             instruction = std::string("translate the speech to ") + lang_name + ".";
             asr_mode    = false;
-        } else if (params->timestamps == TRANSCRIBE_TIMESTAMPS_WORD) {
-            // -plus only (1b/2b advertise NONE, gated out upstream). AUTO does
-            // NOT request timestamps. IBM's verbatim prompt; the model emits
-            // per-word "[T:N]" centisecond markers (parsed in run()).
+        } else if (granite_word_timestamps(cm, params)) {
+            // -plus only (see granite_word_timestamps). IBM's verbatim prompt;
+            // the model emits per-word "[T:N]" centisecond markers (parsed in
+            // run()).
             if (diarize_requested(cm, params)) {
                 // Upstream defines timestamps and speaker attribution as
                 // separate tasks (one instruction each); they do not compose.
@@ -818,7 +833,7 @@ void finalize_granite_result(GraniteModel *                cm,
                              int64_t                       audio_ms,
                              Result &                      out) {
     out.raw_text = raw_text;  // pre-parse marker text, via transcribe_raw_text
-    if (params != nullptr && params->timestamps == TRANSCRIBE_TIMESTAMPS_WORD) {
+    if (granite_word_timestamps(cm, params)) {
         out.full_text = parse_granite_word_timestamps(raw_text, audio_ms, out.words, out.segments);
         if (!out.words.empty()) {
             out.result_kind = TRANSCRIBE_TIMESTAMPS_WORD;
@@ -1129,9 +1144,8 @@ transcribe_status run(transcribe_session *          ctx_base,
         return TRANSCRIBE_ERR_INPUT_TOO_LONG;
     }
 
-    const int gen_budget = transcribe::pick_decode_budget(
-        transcribe::predict_transcript_tokens(n_audio_tokens, cm->limits.ms_per_audio_token), k_gen_reserve, T_prompt,
-        ceiling);
+    const int gen_budget = transcribe::pick_decode_budget(granite_predicted_tokens(cm, params, n_audio_tokens),
+                                                          k_gen_reserve, T_prompt, ceiling);
 
     // Size the KV cache dynamically: T_prompt + room for the longest
     // generation we'll emit, clamped to the context ceiling. Matches the
@@ -1710,10 +1724,9 @@ transcribe_status run_batch(transcribe_session *          session,
         return TRANSCRIBE_OK;
     }
     n_audio_max       = std::max(1, n_audio_max);
-    const int max_new = transcribe::pick_decode_budget(
-        transcribe::predict_transcript_tokens(n_audio_max, cm->limits.ms_per_audio_token), k_gen_reserve, max_T_prompt,
-        ceiling);
-    int max_n_kv = 1024;
+    const int max_new = transcribe::pick_decode_budget(granite_predicted_tokens(cm, params, n_audio_max), k_gen_reserve,
+                                                       max_T_prompt, ceiling);
+    int       max_n_kv = 1024;
     while (max_n_kv < max_T_prompt + max_new) {
         max_n_kv *= 2;
     }
