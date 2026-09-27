@@ -1392,8 +1392,13 @@ transcribe_status whisper_run(transcribe_session *          session,
     if (requested_timestamps == TRANSCRIBE_TIMESTAMPS_WORD) {
         return TRANSCRIBE_ERR_UNSUPPORTED_TIMESTAMPS;
     }
-    const bool want_segment_timestamps =
-        requested_timestamps == TRANSCRIBE_TIMESTAMPS_AUTO || requested_timestamps == TRANSCRIBE_TIMESTAMPS_SEGMENT;
+    // AUTO resolves to NONE under a transcript prefix: the timestamp rules
+    // restart after the prefix and force an initial timestamp near 0 s while
+    // the prefix's speech is still playing, which derails the continuation.
+    // An explicit SEGMENT request keeps openai's prefix + timestamps behavior.
+    const bool has_prefix              = params != nullptr && transcribe::prompting::has_text(params->prefix);
+    const bool want_segment_timestamps = (requested_timestamps == TRANSCRIBE_TIMESTAMPS_AUTO && !has_prefix) ||
+                                         requested_timestamps == TRANSCRIBE_TIMESTAMPS_SEGMENT;
 
     // Multilingual variants emit <|lang|> + <|task|> in the decoder prefix;
     // .en variants have just <|sot|> and no translate/transcribe/language
@@ -1671,6 +1676,37 @@ transcribe_status whisper_run(transcribe_session *          session,
         }
     }
 
+    // Transcript prefix (openai DecodingOptions.prefix): " " + strip(prefix)
+    // right after the SOT sequence, on the first window only. It sits in the
+    // prompt, so the timestamp rules (which read generated_ids) begin after
+    // it and the result text holds only the continuation; raw_text leads
+    // with it.
+    std::vector<int32_t> prefix_ids;
+    if (params != nullptr && params->prefix != nullptr) {
+        std::string p = params->prefix;
+        size_t      a = 0, b = p.size();
+        while (a < b && std::isspace(static_cast<unsigned char>(p[a]))) {
+            ++a;
+        }
+        while (b > a && std::isspace(static_cast<unsigned char>(p[b - 1]))) {
+            --b;
+        }
+        if (b > a) {
+            if (const transcribe_status st =
+                    transcribe::prompting::encode_plain(cm->tok, " " + p.substr(a, b - a), prefix_ids, "prefix");
+                st != TRANSCRIBE_OK) {
+                return st;
+            }
+            for (int32_t id : prefix_ids) {
+                if (id >= eos_id) {
+                    log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "whisper run: prefix encodes to special token id %d", id);
+                    return TRANSCRIBE_ERR_INVALID_ARG;
+                }
+            }
+            all_raw_ids.insert(all_raw_ids.end(), prefix_ids.begin(), prefix_ids.end());
+        }
+    }
+
     // History stored as segment token slices (not one flat vector) because
     // skip_ending_double_timestamps applies per-segment. FIRST_SEGMENT puts the
     // prompt at the head; ALL_SEGMENTS starts empty and re-prepends per chunk.
@@ -1816,7 +1852,7 @@ transcribe_status whisper_run(transcribe_session *          session,
         }
 
         // Prefix for this chunk:
-        //   multilingual: prev_tokens + [SOT, lang, task, notimestamps?]
+        //   multilingual: prev_tokens + [SOT, lang, task, notimestamps?] + prefix?
         //   .en:          prev_tokens + [SOT,             notimestamps?]
         // .en vocab has no <|lang|>/<|task|> tokens; emitting them would land
         // on a garbage id.
@@ -1830,6 +1866,9 @@ transcribe_status whisper_run(transcribe_session *          session,
         }
         if (!want_segment_timestamps) {
             prompt_ids.push_back(cm->hparams.no_timestamps_token_id);
+        }
+        if (is_first_chunk) {
+            prompt_ids.insert(prompt_ids.end(), prefix_ids.begin(), prefix_ids.end());
         }
         const int seq_len = static_cast<int>(prompt_ids.size());
         if (is_first_chunk) {

@@ -30,6 +30,9 @@ void apply_family_invariants(transcribe_model & model) {
     // <|startofprev|> slot (prompting A/B, notes/prompting-ab-results.md).
     transcribe::set_feature(&model, TRANSCRIBE_FEATURE_VOCABULARY, true);
     transcribe::set_feature(&model, TRANSCRIBE_FEATURE_CONTEXT_PROMPT, true);
+    // Transcript prefix after the SOT sequence (openai DecodingOptions.prefix),
+    // first window only.
+    transcribe::set_feature(&model, TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX, true);
 }
 
 }  // namespace transcribe::whisper
