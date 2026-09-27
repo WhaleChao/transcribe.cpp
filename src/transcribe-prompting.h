@@ -48,10 +48,38 @@ transcribe_status encode_plain(const Tokenizer &      tok,
                                std::vector<int32_t> & out_ids,
                                const char *           what);
 
+// Tokenized vocabulary + context for one text slot, fitted to a budget.
+//
+// Terms render as `lead + join(terms, sep) + trail`; the context is encoded
+// as given (the caller includes any separator it needs, e.g. a leading
+// space). When both exceed `budget` tokens the context is trimmed first,
+// keeping its most recent tokens, then terms are dropped from the end of the
+// list (the spec's overflow order), with one WARN naming what was dropped.
+// budget < 0 means unlimited. Terms and context are control-token checked.
+struct TermsFormat {
+    std::string lead;
+    std::string sep;
+    std::string trail;
+};
+
+struct FittedPrompt {
+    std::vector<int32_t> term_ids;
+    std::vector<int32_t> ctx_ids;
+    size_t               n_terms = 0;  // terms kept
+};
+
+transcribe_status fit_terms_and_context(const Tokenizer &                tok,
+                                        const std::vector<std::string> & terms,
+                                        const TermsFormat &              fmt,
+                                        const std::string &              ctx,
+                                        int                              budget,
+                                        const char *                     family,
+                                        FittedPrompt &                   out);
+
 // Rendered-prompt observability for parity tests. Decodes `ids` with special
 // pieces kept, collapsing each run of `audio_id` to "<piece>xN" (the reference
-// harness format). When TRANSCRIBE_PROMPT_DUMP names a file the line is
-// appended there; otherwise it is logged at DEBUG (truncated to the log
+// harness format). When TRANSCRIBE_PROMPT_DUMP names a file a line
+// `family<TAB>n_tokens<TAB>text` is appended there (\\, \n, \t escaped); otherwise it is logged at DEBUG (truncated to the log
 // line limit).
 void dump_rendered(const Tokenizer & tok, const std::vector<int32_t> & ids, int32_t audio_id, const char * family);
 

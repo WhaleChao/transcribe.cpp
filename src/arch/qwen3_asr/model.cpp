@@ -18,6 +18,7 @@
 #include "transcribe-log.h"
 #include "transcribe-mel.h"
 #include "transcribe-meta.h"
+#include "transcribe-prompting.h"
 #include "transcribe-repetition-guard.h"
 #include "weights.h"
 
@@ -77,7 +78,10 @@ constexpr const char k_default_variant[] = "qwen3-asr";
 // via transcribe_was_truncated().
 
 // Generation reserve: what the input gate keeps free, and the decode-budget floor.
-constexpr int k_gen_reserve = 256;
+constexpr int k_gen_reserve         = 256;
+// Upper bound on the chat affixes around the audio (roles, language prefix);
+// used to budget the system context before a clip's length is known.
+constexpr int k_prompt_affix_tokens = 48;
 
 // Effective decoder context ceiling, in tokens: the model's trained maximum,
 // optionally lowered — never raised — by the caller's session n_ctx knob.
@@ -364,12 +368,14 @@ transcribe_status resolve_chat_tokens(const transcribe::Tokenizer & tok, ChatTok
 //   <|im_start|>user\n<|audio_start|><|audio_pad|>*T_enc<|audio_end|><|im_end|>\n
 //   <|im_start|>assistant\n[language {Name}<asr_text>]?
 //
-// System prompt is empty. A non-null `lang_prefix_ids` (resolved via
+// The system message carries the generic prompting context (`system_ids`,
+// empty by default). A non-null `lang_prefix_ids` (resolved via
 // encode_language_prefix) is appended after the trailing newline to force an
 // output language; kept out of here so this stays a pure token-id assembler.
 void build_prompt_tokens(const QwenAsrHParams &       hp,
                          const ChatTokens &           ct,
                          int                          T_enc,
+                         const std::vector<int32_t> & system_ids,
                          const std::vector<int32_t> * lang_prefix_ids,
                          std::vector<int32_t> &       out_ids,
                          std::vector<int64_t> &       out_audio_positions) {
@@ -379,6 +385,7 @@ void build_prompt_tokens(const QwenAsrHParams &       hp,
     out_ids.push_back(ct.im_start);
     out_ids.push_back(ct.role_system);
     out_ids.push_back(ct.newline);
+    out_ids.insert(out_ids.end(), system_ids.begin(), system_ids.end());
     out_ids.push_back(ct.im_end);
     out_ids.push_back(ct.newline);
 
@@ -404,6 +411,35 @@ void build_prompt_tokens(const QwenAsrHParams &       hp,
     if (lang_prefix_ids != nullptr && !lang_prefix_ids->empty()) {
         out_ids.insert(out_ids.end(), lang_prefix_ids->begin(), lang_prefix_ids->end());
     }
+}
+
+// Generic prompting -> system-message ids: vocabulary joined " " (measured
+// better than ", ": fewer whole-dictionary dumps into the output), then
+// " " + prompt verbatim. `budget` is the room the context window leaves
+// after the rest of the prompt and the generation reserve; overflow trims
+// the context first, then terms (see fit_terms_and_context).
+transcribe_status encode_system_context(const transcribe::Tokenizer & tok,
+                                        const transcribe_run_params * params,
+                                        int                           budget,
+                                        std::vector<int32_t> &        out) {
+    out.clear();
+    if (params == nullptr) {
+        return TRANSCRIBE_OK;
+    }
+    const std::vector<std::string> terms = transcribe::prompting::terms(params);
+    std::string                    ctx   = params->prompt != nullptr ? params->prompt : "";
+    if (!terms.empty() && !ctx.empty()) {
+        ctx = " " + ctx;
+    }
+    transcribe::prompting::FittedPrompt fit;
+    if (const transcribe_status st = transcribe::prompting::fit_terms_and_context(
+            tok, terms, { "", " ", "" }, ctx, std::max(budget, 0), "qwen3_asr run", fit);
+        st != TRANSCRIBE_OK) {
+        return st;
+    }
+    out = std::move(fit.term_ids);
+    out.insert(out.end(), fit.ctx_ids.begin(), fit.ctx_ids.end());
+    return TRANSCRIBE_OK;
 }
 
 }  // namespace
@@ -721,7 +757,19 @@ transcribe_status run(transcribe_session *          session,
     // Prompt construction.
     std::vector<int32_t> prompt_ids;
     std::vector<int64_t> audio_positions;
-    build_prompt_tokens(cm->hparams, cm->chat_tokens, T_enc, lang_prefix_ptr, prompt_ids, audio_positions);
+    const int            ceiling = qwen3_context_ceiling(cc->n_ctx, cm->hparams);
+    std::vector<int32_t> system_ids;
+    build_prompt_tokens(cm->hparams, cm->chat_tokens, T_enc, system_ids, lang_prefix_ptr, prompt_ids, audio_positions);
+    if (const transcribe_status st = encode_system_context(
+            cm->tok, params, ceiling - k_gen_reserve - static_cast<int>(prompt_ids.size()), system_ids);
+        st != TRANSCRIBE_OK) {
+        return st;
+    }
+    if (!system_ids.empty()) {
+        build_prompt_tokens(cm->hparams, cm->chat_tokens, T_enc, system_ids, lang_prefix_ptr, prompt_ids,
+                            audio_positions);
+    }
+    transcribe::prompting::dump_rendered(cm->tok, prompt_ids, cm->hparams.audio_token_id, "qwen3_asr");
     const int T_prompt   = static_cast<int>(prompt_ids.size());
     const int prefix_len = audio_positions.empty() ? 0 : static_cast<int>(audio_positions.front());
     const int suffix_len = T_prompt - prefix_len - T_enc;
@@ -729,7 +777,6 @@ transcribe_status run(transcribe_session *          session,
 
     // Input-length gate: audio + prompt + generation must fit the decoder
     // context window. Reject an over-length clip here, before prefill/decode.
-    const int ceiling = qwen3_context_ceiling(cc->n_ctx, cm->hparams);
     if (T_prompt + k_gen_reserve > ceiling) {
         transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
                             "qwen3_asr run: input too long — %d audio + %d prompt tokens "
@@ -1523,6 +1570,16 @@ transcribe_status run_batch(transcribe_session *          session,
         lang_prefix_ptr = &lang_prefix_ids;
     }
 
+    // Shared system context (vocabulary / prompt), one run_params per batch.
+    // Budgeted against the context window without audio; a clip that then
+    // does not fit is that row's INPUT_TOO_LONG, as without a prompt.
+    std::vector<int32_t> system_ids;
+    if (encode_system_context(cm->tok, params,
+                              qwen3_context_ceiling(cc->n_ctx, cm->hparams) - k_gen_reserve - k_prompt_affix_tokens,
+                              system_ids) != TRANSCRIBE_OK) {
+        return run_batch_serial(cc, pcm, n_samples, n, params);
+    }
+
     // Pass 1: per-utterance encoder + prefill into KV slabs.
     std::vector<std::vector<int32_t>> generated(n);
     std::vector<int>                  T_prompt(n, 0);
@@ -1558,7 +1615,7 @@ transcribe_status run_batch(transcribe_session *          session,
             continue;
         }
         std::vector<int64_t> ap;
-        build_prompt_tokens(cm->hparams, cm->chat_tokens, T_enc[b], lang_prefix_ptr, prompt_ids[b], ap);
+        build_prompt_tokens(cm->hparams, cm->chat_tokens, T_enc[b], system_ids, lang_prefix_ptr, prompt_ids[b], ap);
         T_prompt[b] = static_cast<int>(prompt_ids[b].size());
         prefix_len  = ap.empty() ? 0 : static_cast<int>(ap.front());
         // Same gate as single-shot run(); the rest of the batch still runs.

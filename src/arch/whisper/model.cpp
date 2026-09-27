@@ -945,6 +945,10 @@ transcribe_status load_mel_from_ref(const char * ref_dir, int n_mels, int n_mel_
 
 namespace {
 
+bool whisper_has_generic_prompt(const transcribe_run_params * params) {
+    return params != nullptr && (params->n_vocabulary > 0 || transcribe::prompting::has_text(params->prompt));
+}
+
 // Generic prompting (transcribe_run_params::vocabulary / prompt) rendered into
 // the <|startofprev|> slot, as text-only ids (the caller prepends the marker).
 // Text is `Glossary: {terms}` (", "-joined), then " " + prompt, tokenized in
@@ -952,91 +956,37 @@ namespace {
 // `budget` tokens; Whisper natively keeps the LAST tokens, which would drop
 // the highest-priority terms, so overflow is resolved here instead: context
 // is trimmed first (keeping its most recent tokens), then terms are dropped
-// from the end of the list. `warn` emits one WARN naming what was dropped.
-// Returns INVALID_ARG on control-token literals; an empty `out` means
-// nothing to prime.
-bool whisper_has_generic_prompt(const transcribe_run_params * params) {
-    return params != nullptr && (params->n_vocabulary > 0 || transcribe::prompting::has_text(params->prompt));
-}
-
+// from the end of the list, with one WARN naming what was dropped. Returns
+// INVALID_ARG on control-token literals; an empty `out` means nothing to prime.
 transcribe_status whisper_generic_prompt_ids(const WhisperModel &          cm,
                                              const transcribe_run_params * params,
                                              int                           budget,
                                              int                           eos_id,
-                                             bool                          warn,
                                              std::vector<int32_t> &        out) {
     out.clear();
-    auto strip = [](const std::string & s) {
-        size_t a = 0, b = s.size();
-        while (a < b && std::isspace(static_cast<unsigned char>(s[a]))) {
-            ++a;
-        }
-        while (b > a && std::isspace(static_cast<unsigned char>(s[b - 1]))) {
-            --b;
-        }
-        return s.substr(a, b - a);
-    };
-    auto encode = [&](const std::string & text, std::vector<int32_t> & ids) -> transcribe_status {
-        if (const transcribe_status st = transcribe::prompting::encode_plain(cm.tok, text, ids, "prompt");
-            st != TRANSCRIBE_OK) {
-            return st;
-        }
-        for (int32_t id : ids) {
-            if (id >= eos_id) {
-                log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "whisper run: prompting text encodes to special token id %d", id);
-                return TRANSCRIBE_ERR_INVALID_ARG;
-            }
-        }
-        return TRANSCRIBE_OK;
-    };
-
-    std::vector<std::string> terms      = transcribe::prompting::terms(params);
-    const std::string        ctx        = params->prompt != nullptr ? strip(params->prompt) : std::string();
-    const size_t             n_terms_in = terms.size();
-
-    std::vector<int32_t> term_ids;
-    auto                 encode_terms = [&]() -> transcribe_status {
-        term_ids.clear();
-        return terms.empty() ? TRANSCRIBE_OK :
-                               encode(" Glossary: " + transcribe::prompting::join(terms, ", "), term_ids);
-    };
-    if (const transcribe_status st = encode_terms(); st != TRANSCRIBE_OK) {
+    std::string ctx = params->prompt != nullptr ? params->prompt : "";
+    size_t      a = 0, b = ctx.size();
+    while (a < b && std::isspace(static_cast<unsigned char>(ctx[a]))) {
+        ++a;
+    }
+    while (b > a && std::isspace(static_cast<unsigned char>(ctx[b - 1]))) {
+        --b;
+    }
+    ctx = b > a ? " " + ctx.substr(a, b - a) : std::string();
+    transcribe::prompting::FittedPrompt fit;
+    if (const transcribe_status st = transcribe::prompting::fit_terms_and_context(
+            cm.tok, transcribe::prompting::terms(params), { " Glossary: ", ", ", "" }, ctx, budget, "whisper run", fit);
+        st != TRANSCRIBE_OK) {
         return st;
     }
-    std::vector<int32_t> ctx_ids;
-    if (!ctx.empty()) {
-        if (const transcribe_status st = encode(" " + ctx, ctx_ids); st != TRANSCRIBE_OK) {
-            return st;
+    out = std::move(fit.term_ids);
+    out.insert(out.end(), fit.ctx_ids.begin(), fit.ctx_ids.end());
+    for (int32_t id : out) {
+        if (id >= eos_id) {
+            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "whisper run: prompting text encodes to special token id %d", id);
+            return TRANSCRIBE_ERR_INVALID_ARG;
         }
     }
-
-    const size_t ctx_in = ctx_ids.size();
-    if (term_ids.size() + ctx_ids.size() > static_cast<size_t>(budget)) {
-        const size_t room = term_ids.size() < static_cast<size_t>(budget) ? budget - term_ids.size() : 0;
-        ctx_ids.erase(ctx_ids.begin(), ctx_ids.end() - std::min(room, ctx_ids.size()));
-        while (!terms.empty() && term_ids.size() > static_cast<size_t>(budget)) {
-            terms.pop_back();
-            if (const transcribe_status st = encode_terms(); st != TRANSCRIBE_OK) {
-                return st;
-            }
-        }
-        if (warn) {
-            char terms_note[96] = "";
-            if (terms.size() < n_terms_in) {
-                std::snprintf(terms_note, sizeof(terms_note), "dropped %zu of %zu vocabulary terms",
-                              n_terms_in - terms.size(), n_terms_in);
-            }
-            char ctx_note[96] = "";
-            if (ctx_ids.size() < ctx_in) {
-                std::snprintf(ctx_note, sizeof(ctx_note), "kept the last %zu of %zu context tokens", ctx_ids.size(),
-                              ctx_in);
-            }
-            log_msg(TRANSCRIBE_LOG_LEVEL_WARN, "whisper run: %s%s%s (Whisper prompt budget: %d tokens)", terms_note,
-                    (terms_note[0] != '\0' && ctx_note[0] != '\0') ? "; " : "", ctx_note, budget);
-        }
-    }
-    out = term_ids;
-    out.insert(out.end(), ctx_ids.begin(), ctx_ids.end());
     return TRANSCRIBE_OK;
 }
 
@@ -1715,8 +1665,7 @@ transcribe_status whisper_run(transcribe_session *          session,
                     "whisper run: model has no <|startofprev|> token; prompting unavailable");
             return TRANSCRIBE_ERR_GGUF;
         }
-        if (const transcribe_status st =
-                whisper_generic_prompt_ids(*cm, params, max_prev_cap, eos_id, /*warn=*/true, prompt_text_ids);
+        if (const transcribe_status st = whisper_generic_prompt_ids(*cm, params, max_prev_cap, eos_id, prompt_text_ids);
             st != TRANSCRIBE_OK) {
             return st;
         }
@@ -2739,8 +2688,7 @@ transcribe_status whisper_run_batch(transcribe_session *          session,
         const int max_prev_cap =
             wp->max_prev_context_tokens > 0 ? wp->max_prev_context_tokens : (hp.dec_max_target_positions / 2 - 1);
         std::vector<int32_t> ptext;
-        if (prev_sot_id < 0 ||
-            whisper_generic_prompt_ids(*cm, params, max_prev_cap, eos_id, /*warn=*/true, ptext) != TRANSCRIBE_OK) {
+        if (prev_sot_id < 0 || whisper_generic_prompt_ids(*cm, params, max_prev_cap, eos_id, ptext) != TRANSCRIBE_OK) {
             return whisper_run_batch_serial(cc, pcm, n_samples, n, params);
         }
         if (!ptext.empty()) {
