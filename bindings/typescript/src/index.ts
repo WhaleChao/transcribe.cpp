@@ -82,6 +82,7 @@ const KV_TYPES: Record<KvType, number> = {
 const TASKS = {
   transcribe: g.TRANSCRIBE_TASK_TRANSCRIBE,
   translate: g.TRANSCRIBE_TASK_TRANSLATE,
+  instruct: g.TRANSCRIBE_TASK_INSTRUCT,
 };
 const TIMESTAMPS: Record<TimestampKind, number> = {
   none: g.TRANSCRIBE_TIMESTAMPS_NONE,
@@ -116,6 +117,10 @@ const FEATURES: Record<Feature, number> = {
   pnc: g.TRANSCRIBE_FEATURE_PNC,
   itn: g.TRANSCRIBE_FEATURE_ITN,
   diarization: g.TRANSCRIBE_FEATURE_DIARIZATION,
+  vocabulary: g.TRANSCRIBE_FEATURE_VOCABULARY,
+  context_prompt: g.TRANSCRIBE_FEATURE_CONTEXT_PROMPT,
+  instruct: g.TRANSCRIBE_FEATURE_INSTRUCT,
+  transcript_prefix: g.TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX,
 };
 
 // ---- helpers ---------------------------------------------------------------
@@ -855,6 +860,15 @@ export class Session {
     if (opts.specKDrafts !== undefined) p.spec_k_drafts = opts.specKDrafts;
     if (opts.family)
       p.family = buildFamily(n, this.#model.handle, opts.family, "run");
+    if (opts.vocabulary !== undefined && opts.vocabulary.length > 0) {
+      const terms = opts.vocabulary;
+      const arr = n.koffi.alloc("char *", terms.length);
+      n.koffi.encode(arr, "char *", terms, terms.length);
+      p.vocabulary = arr;
+      p.n_vocabulary = terms.length;
+    }
+    if (opts.prompt !== undefined) p.prompt = opts.prompt;
+    if (opts.prefix !== undefined) p.prefix = opts.prefix;
     return p;
   }
 
@@ -955,6 +969,8 @@ export class Session {
       diarize: opts.diarize,
       keepSpecialTags: opts.keepSpecialTags,
       specKDrafts: -1,
+      vocabulary: opts.vocabulary,
+      prompt: opts.prompt,
     });
     const sp: any = {};
     F.streamParamsInit(sp);

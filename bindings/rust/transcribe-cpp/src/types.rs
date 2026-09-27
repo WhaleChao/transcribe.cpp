@@ -15,6 +15,9 @@ pub enum Task {
     Transcribe,
     /// Translate speech into the target language (model must support it).
     Translate,
+    /// `RunOptions::prompt` replaces the task instruction; the output is free
+    /// text (model must support `Feature::Instruct`).
+    Instruct,
 }
 
 impl Task {
@@ -22,6 +25,7 @@ impl Task {
         match self {
             Task::Transcribe => sys::transcribe_task::TRANSCRIBE_TASK_TRANSCRIBE,
             Task::Translate => sys::transcribe_task::TRANSCRIBE_TASK_TRANSLATE,
+            Task::Instruct => sys::transcribe_task::TRANSCRIBE_TASK_INSTRUCT,
         }
     }
 }
@@ -197,7 +201,7 @@ impl Backend {
 /// A yes/no model capability probe (`transcribe_model_supports`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Feature {
-    /// Accepts a free-text/token decode prompt (whisper today).
+    /// The whisper run extension's initial prompt / prompt tokens.
     InitialPrompt,
     /// Runs a multi-tier temperature fallback loop (whisper today).
     TemperatureFallback,
@@ -211,6 +215,14 @@ pub enum Feature {
     Itn,
     /// Produces structured speaker attribution.
     Diarization,
+    /// `RunOptions::vocabulary` is formatted for this model.
+    Vocabulary,
+    /// `RunOptions::prompt` reaches a transcription-conditioning slot.
+    ContextPrompt,
+    /// Supports `Task::Instruct`.
+    Instruct,
+    /// Honors `RunOptions::prefix` as forced decoder text.
+    TranscriptPrefix,
 }
 
 impl Feature {
@@ -224,6 +236,10 @@ impl Feature {
             Feature::Pnc => F::TRANSCRIBE_FEATURE_PNC,
             Feature::Itn => F::TRANSCRIBE_FEATURE_ITN,
             Feature::Diarization => F::TRANSCRIBE_FEATURE_DIARIZATION,
+            Feature::Vocabulary => F::TRANSCRIBE_FEATURE_VOCABULARY,
+            Feature::ContextPrompt => F::TRANSCRIBE_FEATURE_CONTEXT_PROMPT,
+            Feature::Instruct => F::TRANSCRIBE_FEATURE_INSTRUCT,
+            Feature::TranscriptPrefix => F::TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX,
         }
     }
 }
