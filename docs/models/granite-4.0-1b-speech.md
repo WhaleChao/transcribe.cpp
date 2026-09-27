@@ -25,6 +25,8 @@ English-to-Mandarin. Always via English — there is no direct fr↔de, fr↔es,
 etc. Pass the target language as a BCP-47 code via `--translate
 --target-language <code>`; the source language is inferred from the audio.
 
+**Prompting:** vocabulary (`--vocabulary`) as IBM's `Keywords:` list biasing on transcription; it is ignored under translation, where keywords make this model drop the translation.
+
 See IBM's [model card](https://huggingface.co/ibm-granite/granite-4.0-1b-speech)
 for training data, intended use, and upstream evaluation methodology.
 

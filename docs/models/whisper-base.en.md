@@ -10,6 +10,8 @@ OpenAI Whisper base.en — converted to GGUF for transcribe.cpp. English-only; f
 
 Offline English speech-to-text. The model takes a 16 kHz mono WAV and returns a transcript. English-only checkpoints are typically faster and slightly more accurate than the multilingual model at the same parameter count, but they cannot transcribe other languages and cannot translate. Long audio is handled via 30-second chunked decoding.
 
+**Prompting:** vocabulary (`--vocabulary`, rendered as `Glossary: …`), context prompt (`--prompt`) and transcript prefix (`--prefix`, first 30 s window only) through the generic `transcribe_run_params` fields; vocabulary and context share Whisper's 223-token prompt budget.
+
 See the [upstream model card](https://huggingface.co/openai/whisper-base.en) for training data, intended
 use, and the original evaluation methodology.
 

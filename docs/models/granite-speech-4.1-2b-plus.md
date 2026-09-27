@@ -33,6 +33,8 @@ This variant is transcription-only. Unlike the base
 [`granite-speech-4.1-2b`](granite-speech-4.1-2b.md), it does not perform
 speech translation.
 
+**Prompting:** vocabulary (`--vocabulary`, `Keywords:` list biasing) and transcript prefix (`--prefix`), in plain transcription mode only (not with word timestamps or speaker attribution).
+
 See IBM's [model card](https://huggingface.co/ibm-granite/granite-speech-4.1-2b-plus)
 for training data, intended use, and upstream evaluation methodology.
 
