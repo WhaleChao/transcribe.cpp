@@ -28,74 +28,356 @@
     "  - granite-4.1-2b-plus kw: C++ WER 1.11 better than the reference on Q8_0 with identical",
     "    term hits; treat improvements beyond the gate as noise, not a failure."
   ],
-  "defaults": { "wer_abs": 1.0, "recall_pts": 3.0, "follow_pts": 15.0, "cont_wer_abs": 1.5, "dup_pts": 2.0 },
+  "defaults": {
+    "wer_abs": 1.0,
+    "recall_pts": 3.0,
+    "follow_pts": 15.0,
+    "cont_wer_abs": 1.5,
+    "dup_pts": 2.0
+  },
   "models": {
     "whisper-large-v3": {
       "cpp_gguf": "Q8_0 (reference F32)",
       "observed": {
-        "base": { "wer": [12.47, 12.46], "recall": [62.4, 62.1] },
-        "vocab_glossary": { "wer": [16.40, 15.81], "recall": [85.7, 85.7] },
-        "ctx_prev": { "wer": [12.54, 13.67], "recall": [63.0, 63.0], "note": "one looping utt; 11.8 vs 11.7 without it" },
-        "ctx_prev_glossary": { "wer": [9.46, 9.50], "recall": [90.7, 90.4] },
-        "prefix": { "cont_wer": [11.04, 11.04], "dup": [4.2, 4.2] }
+        "base": {
+          "wer": [
+            12.47,
+            12.46
+          ],
+          "recall": [
+            62.4,
+            62.1
+          ]
+        },
+        "vocab_glossary": {
+          "wer": [
+            16.4,
+            15.81
+          ],
+          "recall": [
+            85.7,
+            85.7
+          ]
+        },
+        "ctx_prev": {
+          "wer": [
+            12.54,
+            13.67
+          ],
+          "recall": [
+            63.0,
+            63.0
+          ],
+          "note": "one looping utt; 11.8 vs 11.7 without it"
+        },
+        "ctx_prev_glossary": {
+          "wer": [
+            9.46,
+            9.5
+          ],
+          "recall": [
+            90.7,
+            90.4
+          ]
+        },
+        "prefix": {
+          "cont_wer": [
+            11.04,
+            11.04
+          ],
+          "dup": [
+            4.2,
+            4.2
+          ]
+        }
       }
     },
     "qwen3-asr-1.7b": {
       "cpp_gguf": "Q8_0 (reference BF16)",
       "observed": {
-        "base": { "wer": [10.85, 10.83], "recall": [61.8, 61.8] },
-        "ctx_space": { "wer": [10.13, 10.10], "recall": [82.5, 82.5] },
-        "ctx_prev": { "wer": [10.81, 10.92], "recall": [64.4, 64.1] }
+        "base": {
+          "wer": [
+            10.85,
+            10.83
+          ],
+          "recall": [
+            61.8,
+            61.8
+          ]
+        },
+        "ctx_space": {
+          "wer": [
+            10.13,
+            10.1
+          ],
+          "recall": [
+            82.5,
+            82.5
+          ]
+        },
+        "ctx_prev": {
+          "wer": [
+            10.81,
+            10.92
+          ],
+          "recall": [
+            64.4,
+            64.1
+          ]
+        }
       }
     },
     "qwen3-asr-0.6b": {
       "cpp_gguf": "BF16 (reference BF16)",
       "observed": {
-        "base": { "wer": [12.33, 12.27], "recall": [52.5, 52.2] },
-        "ctx_space": { "wer": [12.42, 12.43], "recall": [74.6, 74.9] },
-        "ctx_prev": { "wer": [12.92, 12.95], "recall": [56.0, 55.7] }
+        "base": {
+          "wer": [
+            12.33,
+            12.27
+          ],
+          "recall": [
+            52.5,
+            52.2
+          ]
+        },
+        "ctx_space": {
+          "wer": [
+            12.42,
+            12.43
+          ],
+          "recall": [
+            74.6,
+            74.9
+          ]
+        },
+        "ctx_prev": {
+          "wer": [
+            12.92,
+            12.95
+          ],
+          "recall": [
+            56.0,
+            55.7
+          ]
+        }
       }
     },
     "granite-4.0-1b": {
       "cpp_gguf": "Q8_0 (reference BF16)",
-      "observed": { "kw": { "wer": [7.06, 7.06], "recall": [84.0, 84.5] } }
+      "observed": {
+        "kw": {
+          "wer": [
+            7.06,
+            7.06
+          ],
+          "recall": [
+            84.0,
+            84.5
+          ]
+        }
+      }
     },
     "granite-4.1-2b": {
       "cpp_gguf": "Q8_0 (reference BF16)",
-      "observed": { "kw_pnc": { "wer": [6.29, 6.34], "recall": [94.5, 94.8] } }
+      "observed": {
+        "kw_pnc": {
+          "wer": [
+            6.29,
+            6.34
+          ],
+          "recall": [
+            94.5,
+            94.8
+          ]
+        }
+      }
     },
     "granite-4.1-2b-plus": {
       "cpp_gguf": "Q8_0 (reference BF16)",
       "observed": {
-        "kw": { "wer": [8.65, 7.54], "recall": [81.3, 81.0], "note": "C++ better; identical term hits" },
-        "prefix": { "cont_wer": [8.57, 8.37], "dup": [5.3, 5.3] }
+        "kw": {
+          "wer": [
+            8.65,
+            7.54
+          ],
+          "recall": [
+            81.3,
+            81.0
+          ],
+          "note": "C++ better; identical term hits"
+        },
+        "prefix": {
+          "cont_wer": [
+            8.57,
+            8.37
+          ],
+          "dup": [
+            5.3,
+            5.3
+          ]
+        },
+        "base_timestamps_auto": {
+          "wer": [
+            null,
+            10.07
+          ],
+          "recall": [
+            null,
+            52.2
+          ],
+          "note": "C++ only: word-timestamps task selected by AUTO, vs 8.19 / 65.6 for plain transcription"
+        }
       }
     },
     "moss": {
       "cpp_gguf": "BF16 regenerated with the instruction split (reference BF16)",
       "observed": {
-        "base": { "wer": [9.53, 9.48], "recall": [70.6, 70.8] },
-        "hotwords": { "wer": [9.20, 9.14], "recall": [89.5, 89.8] }
+        "base": {
+          "wer": [
+            9.53,
+            9.48
+          ],
+          "recall": [
+            70.6,
+            70.8
+          ]
+        },
+        "hotwords": {
+          "wer": [
+            9.2,
+            9.14
+          ],
+          "recall": [
+            89.5,
+            89.8
+          ]
+        }
       }
     },
     "fun-asr-nano": {
       "cpp_gguf": "BF16 (reference F32 CPU)",
       "observed": {
-        "base": { "wer": [15.17, 15.09], "recall": [39.4, 39.7] },
-        "hotwords": { "wer": [14.34, 14.38], "recall": [58.3, 58.3] }
+        "base": {
+          "wer": [
+            15.17,
+            15.09
+          ],
+          "recall": [
+            39.4,
+            39.7
+          ]
+        },
+        "hotwords": {
+          "wer": [
+            14.34,
+            14.38
+          ],
+          "recall": [
+            58.3,
+            58.3
+          ]
+        }
       }
     },
     "canary-1b-v2": {
       "cpp_gguf": "F16",
-      "observed": { "prefix": { "cont_wer": [15.27, 12.68], "dup": [4.6, 4.6], "note": "two looping utts; 11.99 vs 11.84 without them" } }
+      "observed": {
+        "prefix": {
+          "cont_wer": [
+            15.27,
+            12.68
+          ],
+          "dup": [
+            4.6,
+            4.6
+          ],
+          "note": "two looping utts; 11.99 vs 11.84 without them"
+        }
+      }
     },
     "canary-1b-flash": {
       "cpp_gguf": "F16",
-      "observed": { "prefix": { "cont_wer": [12.31, 12.29], "dup": [3.9, 3.9] } }
+      "observed": {
+        "prefix": {
+          "cont_wer": [
+            12.31,
+            12.29
+          ],
+          "dup": [
+            3.9,
+            3.9
+          ]
+        }
+      }
     },
     "canary-180m-flash": {
       "cpp_gguf": "F16",
-      "observed": { "prefix": { "cont_wer": [13.51, 13.53], "dup": [4.2, 4.2] } }
+      "observed": {
+        "prefix": {
+          "cont_wer": [
+            13.51,
+            13.53
+          ],
+          "dup": [
+            4.2,
+            4.2
+          ]
+        }
+      }
+    },
+    "voxtral-mini-3b": {
+      "cpp_gguf": "Q8_0 (reference BF16)",
+      "observed": {
+        "follow_rate": {
+          "i_french": [
+            100,
+            100
+          ],
+          "i_summary": [
+            10,
+            20
+          ],
+          "i_numbers": [
+            100,
+            100
+          ],
+          "i_caps": [
+            100,
+            100
+          ],
+          "i_question": [
+            85,
+            80
+          ]
+        }
+      }
+    },
+    "voxtral-small-24b": {
+      "cpp_gguf": "Q8_0 (reference BF16)",
+      "observed": {
+        "follow_rate": {
+          "i_french": [
+            100,
+            100
+          ],
+          "i_summary": [
+            30,
+            30
+          ],
+          "i_numbers": [
+            100,
+            100
+          ],
+          "i_caps": [
+            95,
+            90
+          ],
+          "i_question": [
+            80,
+            85
+          ]
+        }
+      }
     }
   }
 }
