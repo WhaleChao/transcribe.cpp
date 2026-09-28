@@ -50,6 +50,8 @@ struct CptFlags {
 
     bool is_whitespace() const { return (bits & WHITESPACE) != 0; }
 
+    bool is_accent_mark() const { return (bits & ACCENT_MARK) != 0; }
+
     // True if any category bit in MASK_CATEGORIES (the low byte) is
     // set. Mirrors unicode_cpt_flags::as_uint() & MASK_CATEGORIES != 0
     // from llama.cpp. Used by the pretokenizer to distinguish "known
@@ -171,5 +173,36 @@ std::vector<std::string> pretokenize_gpt2_raw_bytes(const std::string & text);
 // trained to see right after "format". Without this granite-specific
 // pretokenizer we'd emit 5380 where the reference produces (30, 198).
 std::vector<std::string> pretokenize_granite(const std::string & text);
+
+// Mistral Tekken pretokenizer (Voxtral). The tekken.json pattern is:
+//
+//   [^\r\n\p{L}\p{N}]? [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]* [\p{Ll}\p{Lm}\p{Lo}\p{M}]+
+//   | [^\r\n\p{L}\p{N}]? [\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}]+ [\p{Ll}\p{Lm}\p{Lo}\p{M}]*
+//   | \p{N}
+//   |  ?[^\s\p{L}\p{N}]+ [\r\n/]*
+//   | \s* [\r\n]+
+//   | \s+ (?!\S)
+//   | \s+
+//
+// Differences from the Qwen2 variant:
+//   1. No contraction alternative.
+//   2. Letter runs split on case: a word is an upper run followed by
+//      a lower run, so "iPhone" -> "i", "Phone" while "HTTPServer"
+//      stays whole (upper run "HTTPS", lower run "erver").
+//   3. Combining marks (\p{M}) join letter runs, so abugida words
+//      (Devanagari, Thai, ...) stay one pretoken.
+//   4. Symbol runs swallow a trailing `[\r\n/]*`.
+//
+// Case is ASCII-only, as in llama.cpp's Tekken regex: A-Z is upper,
+// a-z is lower, and every other letter is in both classes (like
+// \p{Lm} / \p{Lo}), so a non-ASCII lower->UPPER change inside a word
+// does not split. That avoids a Unicode case table and rarely changes
+// the ids: against mistral-common's Tekkenizer, only glued words like
+// "нужноМАНА" differ (17 of ~770k vocab-derived stress strings; none in
+// ordinary text). Unlike llama.cpp, marks join letter runs, which the
+// ids do depend on (Devanagari, Thai, ...).
+//
+// Reference: mistral-common Tekkenizer (tiktoken, Rust fancy-regex).
+std::vector<std::string> pretokenize_tekken(const std::string & text);
 
 }  // namespace transcribe::unicode
