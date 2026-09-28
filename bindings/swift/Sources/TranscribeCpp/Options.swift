@@ -4,7 +4,8 @@ import Foundation
 // MARK: - Enums
 
 /// The run mode: plain transcription, speech translation, or `instruct`
-/// (`RunOptions.prompt` replaces the task instruction; free-text output).
+/// (`RunOptions.prompt` replaces the task instruction; free-text output;
+/// offline only).
 /// Named `TranscriptionTask` (not `Task`) so it does not shadow Swift's
 /// `_Concurrency.Task` in files that `import TranscribeCpp`.
 public enum TranscriptionTask: Sendable {
@@ -154,7 +155,8 @@ public struct RunOptions: Sendable {
     /// the required instruction under `.instruct`.
     public var prompt: String?
     /// Transcript text the model continues from (`Feature.transcriptPrefix`;
-    /// an error elsewhere, and in batch and streaming runs).
+    /// an error elsewhere, and in batch and streaming runs). `text` holds only
+    /// the continuation; `rawText` leads with the prefix.
     public var prefix: String?
 
     public init(
@@ -190,9 +192,20 @@ public struct RunOptions: Sendable {
         self.prefix = prefix
     }
 
+    /// Throws `.invalidArgument` if a string option contains a NUL character,
+    /// where C would silently cut it.
+    func checkCStrings() throws {
+        var strings = [language, targetLanguage, prompt, prefix].compactMap { $0 } + vocabulary
+        if case .whisper(let o)? = family, let p = o.initialPrompt { strings.append(p) }
+        if strings.contains(where: { $0.contains("\0") }) {
+            throw TranscribeError.invalidArgument("a string option contains a NUL character")
+        }
+    }
+
     /// Materialize a `transcribe_run_params` and run `body` with a pointer to
-    /// it. The `language` / `target_language` C strings are kept alive for the
-    /// duration of `body` (the C side copies them before returning).
+    /// it. The C strings (language, target language, vocabulary, prompt,
+    /// prefix) are kept alive for the duration of `body` (the C side copies
+    /// them before returning).
     func withCParams<R>(_ body: (UnsafePointer<transcribe_run_params>) throws -> R) rethrows -> R {
         var params = transcribe_run_params()
         transcribe_run_params_init(&params)

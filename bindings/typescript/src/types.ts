@@ -4,6 +4,8 @@ import type { TranscribeError } from "./errors.js";
 
 export type Backend = "auto" | "cpu" | "cpu_accel" | "cuda" | "rocm" | "vulkan" | "metal";
 export type KvType = "auto" | "f32" | "f16";
+/** "instruct": `prompt` replaces the task instruction and the output is free
+ *  text ("instruct" feature; offline only). */
 export type Task = "transcribe" | "translate" | "instruct";
 export type TimestampKind = "none" | "auto" | "segment" | "word" | "token";
 export type Pnc = "default" | "off" | "on";
@@ -174,12 +176,13 @@ export interface TranscribeOptions {
   family?: FamilyExtension;
   /** Custom terms in priority order, formatted per family ("vocabulary"
    *  feature; ignored with a warning elsewhere). */
-  vocabulary?: string[];
+  vocabulary?: readonly string[];
   /** Context text under transcribe/translate ("context_prompt" feature); the
    *  required instruction under task "instruct". */
   prompt?: string;
   /** Transcript text the model continues from ("transcript_prefix" feature;
-   *  an error elsewhere, and in runBatch). */
+   *  an error elsewhere, and in runBatch). `text` holds only the continuation;
+   *  `rawText` leads with the prefix. */
   prefix?: string;
 }
 
@@ -228,7 +231,7 @@ export interface StreamOptions {
   commitPolicy?: CommitPolicy;
   stablePrefixAgreementN?: number;
   /** Custom terms in priority order (see TranscribeOptions.vocabulary). */
-  vocabulary?: string[];
+  vocabulary?: readonly string[];
   /** Context text (see TranscribeOptions.prompt). */
   prompt?: string;
   /** A stream-slot family extension (moonshine, parakeet, voxtral). */

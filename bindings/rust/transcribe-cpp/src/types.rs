@@ -9,6 +9,7 @@ use transcribe_cpp_sys as sys;
 
 /// The task a run performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum Task {
     /// Transcribe speech in its source language.
     #[default]
@@ -16,7 +17,8 @@ pub enum Task {
     /// Translate speech into the target language (model must support it).
     Translate,
     /// `RunOptions::prompt` replaces the task instruction; the output is free
-    /// text (model must support `Feature::Instruct`).
+    /// text in `text` / `raw_text` (model must support `Feature::Instruct`;
+    /// offline only).
     Instruct,
 }
 
@@ -200,6 +202,7 @@ impl Backend {
 
 /// A yes/no model capability probe (`transcribe_model_supports`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Feature {
     /// The whisper run extension's initial prompt / prompt tokens.
     InitialPrompt,

@@ -659,6 +659,13 @@ def _stream_update_from(u) -> StreamUpdate:
     )
 
 
+def _cstr(value: str, name: str) -> bytes:
+    """UTF-8 bytes for a C string option; a NUL would silently cut it in C."""
+    if "\x00" in value:
+        raise InvalidArgument(f"{name} contains a NUL character")
+    return value.encode("utf-8")
+
+
 def _build_run_params(task, language, target_language, timestamps,
                       keep_special_tags, spec_k_drafts, diarize="default",
                       pnc="default", itn="default", vocabulary=None,
@@ -675,24 +682,27 @@ def _build_run_params(task, language, target_language, timestamps,
     params.pnc = _enum(_PNC, pnc, "pnc")
     params.itn = _enum(_ITN, itn, "itn")
     params.diarize = _enum(_DIARIZE, diarize, "diarize")
-    params.language = language.encode("utf-8") if language else None
-    params.target_language = target_language.encode("utf-8") if target_language else None
+    params.language = _cstr(language, "language") if language else None
+    params.target_language = _cstr(target_language, "target_language") if target_language else None
     params.keep_special_tags = keep_special_tags
     params.spec_k_drafts = spec_k_drafts
     if vocabulary is not None:
         if isinstance(vocabulary, (str, bytes)):
             raise InvalidArgument("vocabulary must be a sequence of terms, not a single string")
+        if isinstance(vocabulary, (set, frozenset, dict)):
+            raise InvalidArgument("vocabulary is in priority order; pass a list, not a set or dict")
+        vocabulary = list(vocabulary)  # an iterator would be used up by the check below
         if not all(isinstance(t, str) for t in vocabulary):
             raise InvalidArgument("vocabulary terms must be strings")
-        terms = [t.encode("utf-8") for t in vocabulary]
+        terms = [_cstr(t, "vocabulary") for t in vocabulary]
         if terms:
             arr = (ctypes.c_char_p * len(terms))(*terms)
             params.vocabulary = ctypes.cast(arr, ctypes.POINTER(ctypes.c_char_p))
             params.n_vocabulary = len(terms)
             # The C struct holds raw pointers; keep the buffers alive with it.
             params._prompting_keepalive = (arr, terms)
-    params.prompt = prompt.encode("utf-8") if prompt else None
-    params.prefix = prefix.encode("utf-8") if prefix else None
+    params.prompt = _cstr(prompt, "prompt") if prompt else None
+    params.prefix = _cstr(prefix, "prefix") if prefix else None
     return params
 
 
@@ -761,7 +771,7 @@ class WhisperRunOptions(FamilyExtension):
 
     def _apply(self, ext) -> None:
         if self.initial_prompt is not None:
-            ext.initial_prompt = self.initial_prompt.encode("utf-8")
+            ext.initial_prompt = _cstr(self.initial_prompt, "initial_prompt")
         if self.condition_on_prev_tokens is not None:
             ext.condition_on_prev_tokens = self.condition_on_prev_tokens
         if self.temperature is not None:
@@ -1002,8 +1012,7 @@ class Model:
         )
 
     def supports(self, feature: Feature) -> bool:
-        """Whether the model exposes a behavioral feature (initial prompt,
-        temperature fallback, long-form, cancellation, pnc, itn)."""
+        """Whether the model exposes a behavioral feature (see ``Feature``)."""
         return bool(_lib.transcribe_model_supports(
             self._h, _enum(_FEATURES, feature, "feature")))
 
@@ -1143,7 +1152,8 @@ class Session:
         ``"transcript_prefix"``. With ``task="instruct"`` the ``prompt`` is the
         required instruction and the output is free text. Unsupported
         vocabulary/context is ignored with a warning; an unsupported prefix
-        or instruct task raises.
+        or instruct task raises. With ``prefix``, ``text`` holds only the
+        continuation and ``raw_text`` leads with the prefix.
 
         On ``Aborted`` (via :meth:`cancel`) and ``OutputTruncated`` (including
         its ``OutputRepetition`` subclass) the partial transcript is preserved
@@ -1281,7 +1291,9 @@ class Session:
         otherwise raises NotImplementedByModel. ``family`` is an optional
         family-specific stream extension (e.g. MoonshineStreamingOptions). The
         session is single-threaded and runs at most one stream at a time. Use
-        the Stream as a context manager so it is reset when you are done."""
+        the Stream as a context manager so it is reset when you are done.
+        ``vocabulary`` and ``prompt`` are as in :meth:`run`; ``task="instruct"``
+        raises."""
         self._cancel.clear()
         # spec_k_drafts is an offline-decode knob; streaming always uses the
         # family default (-1).

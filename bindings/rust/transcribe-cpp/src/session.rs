@@ -51,7 +51,8 @@ pub struct RunOptions {
     /// `Task::Instruct`.
     pub prompt: Option<String>,
     /// Transcript text the model continues from (`Feature::TranscriptPrefix`;
-    /// an error elsewhere, and in batch and streaming runs).
+    /// an error elsewhere, and in batch and streaming runs). `text` holds only
+    /// the continuation; `raw_text` leads with the prefix.
     pub prefix: Option<String>,
 }
 
@@ -279,7 +280,8 @@ impl Session {
 
     /// Begin a streaming run, returning a [`Stream`] that borrows this session
     /// for its lifetime (so the session can't be used for an offline `run`
-    /// while a stream is active). `run` supplies task / language / timestamps;
+    /// while a stream is active). `run` supplies task / language / timestamps /
+    /// vocabulary / prompt;
     /// `stream` supplies the commit policy and any stream-slot family extension.
     /// Dropping the returned `Stream` abandons it and returns the session to
     /// idle.

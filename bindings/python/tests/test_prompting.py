@@ -31,18 +31,40 @@ def test_vocabulary_rejects_single_string():
         t._build_run_params("transcribe", None, None, "auto", False, -1, vocabulary="GGUF")
 
 
+def test_nul_in_string_option_is_rejected():
+    for kwargs in ({"prompt": "a\x00b"}, {"prefix": "a\x00b"}, {"vocabulary": ["a\x00b"]}):
+        with pytest.raises(t.InvalidArgument):
+            t._build_run_params("transcribe", None, None, "auto", False, -1, **kwargs)
+
+
+def test_vocabulary_accepts_iterators_rejects_sets():
+    params = t._build_run_params("transcribe", None, None, "auto", False, -1,
+                                 vocabulary=(w for w in ["GGUF", "ggml"]))
+    assert params.n_vocabulary == 2
+    with pytest.raises(t.InvalidArgument):
+        t._build_run_params("transcribe", None, None, "auto", False, -1, vocabulary={"GGUF"})
+
+
 def test_prompting_features_probe(model_path):
     with t.Model(model_path, backend="cpu") as model:
         for feature in ("vocabulary", "context_prompt", "instruct", "transcript_prefix"):
             assert isinstance(model.supports(feature), bool)
 
 
-def test_unsupported_prefix_raises(model_path, audio_pcm):
-    with t.Model(model_path, backend="cpu") as model, model.session() as session:
+def test_unsupported_prefix_raises(streaming_model_path, audio_pcm):
+    with t.Model(streaming_model_path, backend="cpu") as model, model.session() as session:
         if model.supports("transcript_prefix"):
             pytest.skip("model supports a transcript prefix")
         with pytest.raises(t.InvalidArgument):
             session.run(audio_pcm, prefix="And so")
+
+
+def test_stream_prompting(streaming_model_path):
+    with t.Model(streaming_model_path, backend="cpu") as model, model.session() as session:
+        with pytest.raises(t.UnsupportedRequest):
+            session.stream(task="instruct", prompt="Summarize.")
+        with session.stream(vocabulary=["Kennedy", "Americans"], prompt="A speech."):
+            pass
 
 
 def _whisper(model):
@@ -61,6 +83,10 @@ def test_whisper_prefix_contract(model_path, audio_pcm):
     assert res.raw_text.strip().startswith(prefix)
     assert not res.text.lower().startswith("and so")
     assert "ask not" in res.text.lower()
+    # Whisper's timestamp rules do not compose with a prefix.
+    with t.Model(model_path, backend="cpu") as model, model.session() as session:
+        with pytest.raises(t.InvalidArgument):
+            session.run(audio_pcm, prefix=prefix, timestamps="segment")
 
 
 def test_whisper_vocabulary_and_context(model_path, audio_pcm):
@@ -71,6 +97,8 @@ def test_whisper_vocabulary_and_context(model_path, audio_pcm):
         res = session.run(audio_pcm, vocabulary=["Kennedy", "Americans"],
                           prompt="An inaugural address.")
         assert "country" in res.text.lower()
+        batch = session.run_batch([audio_pcm, audio_pcm], vocabulary=["Kennedy", "Americans"])
+        assert len(batch) == 2 and all("country" in r.text.lower() for r in batch)
         # The whisper extension's prompt and the generic fields share one slot.
         with pytest.raises(t.InvalidArgument):
             session.run(audio_pcm, vocabulary=["Kennedy"],
@@ -78,12 +106,11 @@ def test_whisper_vocabulary_and_context(model_path, audio_pcm):
 
 
 def test_control_token_literal_rejected(model_path, audio_pcm):
-    """Control-token literals are rejected before the previous result is
-    cleared, and without running the model."""
+    """A control-token literal is rejected and leaves the previous result."""
     with t.Model(model_path, backend="cpu") as model, model.session() as session:
         if not _whisper(model):
             pytest.skip("whisper-specific rendering")
+        first = session.run(audio_pcm)
         with pytest.raises(t.InvalidArgument):
             session.run(audio_pcm, prompt="hello <|endoftext|>")
-        with pytest.raises(t.InvalidArgument):
-            session.run(audio_pcm, prefix="And so", timestamps="segment")
+        assert session._materialize().text == first.text
