@@ -46,30 +46,30 @@ void check_case(const Case & c) {
 int main() {
     const std::vector<Case> cases = {
         // Case split: lower->Upper boundary splits, UPPER+lower stays one word.
-        { u8"iPhone McDonald HTTPServer",         { u8"i", u8"Phone", u8" Mc", u8"Donald", u8" HTTPServer" }     },
-        { u8"ABC aBC AbC",                        { u8"ABC", u8" a", u8"BC", u8" Ab", u8"C" }                    },
+        { u8"iPhone McDonald HTTPServer",                                                { u8"i", u8"Phone", u8" Mc", u8"Donald", u8" HTTPServer" } },
+        { u8"ABC aBC AbC",                                                               { u8"ABC", u8" a", u8"BC", u8" Ab", u8"C" }                },
         // No contraction alternative: the apostrophe prefixes the letters.
-        { u8"don't I'M",                          { u8"don", u8"'t", u8" I", u8"'M" }                            },
+        { u8"don't I'M",                                                                 { u8"don", u8"'t", u8" I", u8"'M" }                        },
         // Symbol runs swallow a trailing [\r\n/]*.
-        { u8"!\n/x",                              { u8"!\n/", u8"x" }                                            },
-        { u8"a /\r\n/ b",                         { u8"a", u8" /\r\n/", u8" b" }                                 },
+        { u8"!\n/x",                                                                     { u8"!\n/", u8"x" }                                        },
+        { u8"a /\r\n/ b",                                                                { u8"a", u8" /\r\n/", u8" b" }                             },
         // ASCII-only case: non-ASCII letters sit in both classes, so the
         // regex split before U+00C4 does not happen.
-        { u8"\u00d6l\u00c4nderung \u01c5emal", { u8"\u00d6l\u00c4nderung", u8" \u01c5emal" } },
+        { u8"\u00d6l\u00c4nderung \u01c5emal",                                           { u8"\u00d6l\u00c4nderung", u8" \u01c5emal" }              },
         // Lm (U+02B0) sits in both classes.
-        { u8"a\u02b0B",                           { u8"a\u02b0", u8"B" }                                         },
+        { u8"a\u02b0B",                                                                  { u8"a\u02b0", u8"B" }                                     },
         // Combining marks join letter runs, or stand alone after a prefix.
-        { u8"e\u0301cole \u0301 !\u0301a",        { u8"e\u0301cole", u8" \u0301", u8" !\u0301", u8"a" }          },
+        { u8"e\u0301cole \u0301 !\u0301a",                                               { u8"e\u0301cole", u8" \u0301", u8" !\u0301", u8"a" }      },
         // Devanagari: vowel signs / virama are \p{M}, so words stay whole.
         { u8"\u0928\u092e\u0938\u094d\u0924\u0947 \u0926\u0941\u0928\u093f\u092f\u093e",
-         { u8"\u0928\u092e\u0938\u094d\u0924\u0947", u8" \u0926\u0941\u0928\u093f\u092f\u093e" }                 },
+         { u8"\u0928\u092e\u0938\u094d\u0924\u0947", u8" \u0926\u0941\u0928\u093f\u092f\u093e" }                                                    },
         // Single-codepoint \p{N}, including non-ASCII digits / fractions.
-        { u8"12 \u0663\u00bd",                    { u8"1", u8"2", u8" ", u8"\u0663", u8"\u00bd" }                },
+        { u8"12 \u0663\u00bd",                                                           { u8"1", u8"2", u8" ", u8"\u0663", u8"\u00bd" }            },
         // Whitespace alternatives.
-        { u8"  x  \n\n  y   ",                    { u8" ", u8" x", u8"  \n\n", u8" ", u8" y", u8"   " }         },
+        { u8"  x  \n\n  y   ",                                                           { u8" ", u8" x", u8"  \n\n", u8" ", u8" y", u8"   " }      },
         // Supplementary-plane letters (binary-search path of the flags table).
-        { u8"\U00010400\U00010428 \U0001D400", { u8"\U00010400\U00010428", u8" \U0001D400" } },
-        { u8"",                                   {}                                                             },
+        { u8"\U00010400\U00010428 \U0001D400",                                           { u8"\U00010400\U00010428", u8" \U0001D400" }              },
+        { u8"",                                                                          {}                                                         },
     };
     for (const Case & c : cases) {
         check_case(c);
