@@ -502,6 +502,9 @@ bool parse_args(int argc, char ** argv, cli_args & out) {
                     return false;
                 }
                 text.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+                if (text.rfind("\xEF\xBB\xBF", 0) == 0) {
+                    text.erase(0, 3);  // UTF-8 byte-order mark
+                }
                 sep = '\n';
             }
             size_t start = 0;
@@ -786,6 +789,10 @@ bool parse_args(int argc, char ** argv, cli_args & out) {
     }
     if (!out.wav_path.empty() && !out.batch_file.empty()) {
         std::fprintf(stderr, "error: cannot combine positional audio.wav with --batch\n");
+        return false;
+    }
+    if (!out.prefix.empty() && !out.batch_file.empty()) {
+        std::fprintf(stderr, "error: --prefix describes one utterance and cannot be combined with --batch\n");
         return false;
     }
     if (out.stream_chunk_ms > 0 && out.repeat > 1) {
