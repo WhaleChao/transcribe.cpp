@@ -1693,23 +1693,33 @@ transcribe_status whisper_run(transcribe_session *          session,
     }
     all_raw_ids.insert(all_raw_ids.end(), prefix_ids.begin(), prefix_ids.end());
 
-    // Cap prompt tokens (left-truncate, keep most-recent). The prefix shares
-    // the conditioning half of the decoder window with the prompt, so the
-    // first window's prompt + prefix stay within max_prev_cap and the rest of
-    // the window is left for the continuation.
-    const int prompt_cap = std::max(max_prev_cap - static_cast<int>(prefix_ids.size()), 0);
-    if (static_cast<int>(prompt_text_ids.size()) > prompt_cap) {
-        prompt_text_ids.erase(prompt_text_ids.begin(), prompt_text_ids.end() - prompt_cap);
-    }
-    // Generic vocabulary / context prompt share the same slot and budget
-    // (whisper_run_validate rejects them alongside the extension prompt).
-    if (whisper_has_generic_prompt(params)) {
-        if (prev_sot_id < 0) {
-            log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
-                    "whisper run: model has no <|startofprev|> token; prompting unavailable");
-            return TRANSCRIBE_ERR_GGUF;
+    // Prompt ids capped to `cap` tokens: the extension prompt keeps its most
+    // recent tokens; the generic vocabulary / context prompt, which share the
+    // slot (whisper_run_validate rejects them together), are fitted.
+    const std::vector<int32_t> ext_prompt_ids = std::move(prompt_text_ids);
+    const auto                 capped_prompt  = [&](int cap, std::vector<int32_t> & out) -> transcribe_status {
+        if (whisper_has_generic_prompt(params)) {
+            if (prev_sot_id < 0) {
+                log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                        "whisper run: model has no <|startofprev|> token; prompting unavailable");
+                return TRANSCRIBE_ERR_GGUF;
+            }
+            return whisper_generic_prompt_ids(*cm, params, cap, eos_id, out);
         }
-        if (const transcribe_status st = whisper_generic_prompt_ids(*cm, params, prompt_cap, eos_id, prompt_text_ids);
+        const size_t keep = std::min(ext_prompt_ids.size(), static_cast<size_t>(std::max(cap, 0)));
+        out.assign(ext_prompt_ids.end() - static_cast<std::ptrdiff_t>(keep), ext_prompt_ids.end());
+        return TRANSCRIBE_OK;
+    };
+    // Later windows get the full slot. The first window shares it with the
+    // prefix, so its prompt + prefix stay within max_prev_cap and the rest of
+    // the decoder window is left for the continuation.
+    if (const transcribe_status st = capped_prompt(max_prev_cap, prompt_text_ids); st != TRANSCRIBE_OK) {
+        return st;
+    }
+    std::vector<int32_t> first_prompt_ids = prompt_text_ids;
+    if (!prefix_ids.empty()) {
+        if (const transcribe_status st =
+                capped_prompt(max_prev_cap - static_cast<int>(prefix_ids.size()), first_prompt_ids);
             st != TRANSCRIBE_OK) {
             return st;
         }
@@ -1719,8 +1729,8 @@ transcribe_status whisper_run(transcribe_session *          session,
     // skip_ending_double_timestamps applies per-segment. FIRST_SEGMENT puts the
     // prompt at the head; ALL_SEGMENTS starts empty and re-prepends per chunk.
     std::vector<std::vector<int32_t>> prev_history_segments;
-    if (wp->prompt_condition == TRANSCRIBE_WHISPER_PROMPT_FIRST_SEGMENT && !prompt_text_ids.empty()) {
-        prev_history_segments.push_back(prompt_text_ids);
+    if (wp->prompt_condition == TRANSCRIBE_WHISPER_PROMPT_FIRST_SEGMENT && !first_prompt_ids.empty()) {
+        prev_history_segments.push_back(first_prompt_ids);
     }
 
     // Per-chunk; HF auto-disables when the previous chunk's accepted
@@ -1834,11 +1844,12 @@ transcribe_status whisper_run(transcribe_session *          session,
         //   else: empty.
         // We diverge from HF for FIRST_SEGMENT (the default): prime only the
         // first window, matching whisper.cpp / OpenAI.
-        std::vector<int32_t> prev_tokens;
+        const std::vector<int32_t> & window_prompt = is_first_chunk ? first_prompt_ids : prompt_text_ids;
+        std::vector<int32_t>         prev_tokens;
         if (do_condition_on_prev_tokens && !prev_history_segments.empty() && prev_sot_id >= 0) {
             prev_tokens.push_back(prev_sot_id);
-            if (wp->prompt_condition == TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS && !prompt_text_ids.empty()) {
-                prev_tokens.insert(prev_tokens.end(), prompt_text_ids.begin(), prompt_text_ids.end());
+            if (wp->prompt_condition == TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS && !window_prompt.empty()) {
+                prev_tokens.insert(prev_tokens.end(), window_prompt.begin(), window_prompt.end());
             }
             std::vector<int32_t> hist;
             for (const auto & seg : prev_history_segments) {
@@ -1852,11 +1863,11 @@ transcribe_status whisper_run(transcribe_session *          session,
             }
             const int cap = std::min<int>(static_cast<int>(hist.size()), max_prev_cap);
             prev_tokens.insert(prev_tokens.end(), hist.end() - cap, hist.end());
-        } else if (!prompt_text_ids.empty() && prev_sot_id >= 0 &&
+        } else if (!window_prompt.empty() && prev_sot_id >= 0 &&
                    (is_first_chunk || wp->prompt_condition == TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS)) {
             // FIRST_SEGMENT primes the initial prompt on the first window
             prev_tokens.push_back(prev_sot_id);
-            prev_tokens.insert(prev_tokens.end(), prompt_text_ids.begin(), prompt_text_ids.end());
+            prev_tokens.insert(prev_tokens.end(), window_prompt.begin(), window_prompt.end());
         }
 
         // Prefix for this chunk:

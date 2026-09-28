@@ -782,8 +782,14 @@ transcribe_status run(transcribe_session *          session,
                             n_audio_total, T_prompt - n_audio_total, model_max, T_prompt + k_gen_reserve);
         return TRANSCRIBE_ERR_INPUT_TOO_LONG;
     }
-    const int max_new  = transcribe::pick_decode_budget(n_audio_total, k_decode_budget_min, T_prompt, model_max);
-    const int want_ctx = causal_lm::pick_kv_cache_context(T_prompt + max_new, model_max);
+    // A transcript's length follows the audio, which sets both the budget and
+    // the KV size. Free text (TRANSCRIBE_TASK_INSTRUCT) does not: it runs until
+    // EOS, a repetition stop or the context ceiling, growing the KV cache on
+    // demand from the same starting size.
+    const bool free_text = params != nullptr && params->task == TRANSCRIBE_TASK_INSTRUCT;
+    const int  predicted = transcribe::pick_decode_budget(n_audio_total, k_decode_budget_min, T_prompt, model_max);
+    const int  max_new   = free_text ? model_max - T_prompt : predicted;
+    const int  want_ctx  = causal_lm::pick_kv_cache_context(T_prompt + predicted, model_max);
     if (cc->kv_cache.n_ctx < want_ctx) {
         const ggml_type kv_type = (cc->kv_type == TRANSCRIBE_KV_TYPE_F32) ? GGML_TYPE_F32 : GGML_TYPE_F16;
         cc->kv_cache.free();
@@ -928,18 +934,18 @@ transcribe_status run(transcribe_session *          session,
     int           cur_past = T_prompt;
 
     int max_n_kv = 1024;
-    while (max_n_kv < T_prompt + max_new) {
+    while (max_n_kv < T_prompt + std::min(max_new, predicted)) {
         max_n_kv *= 2;
     }
-    if (max_n_kv > cc->kv_cache.n_ctx) {
-        max_n_kv = cc->kv_cache.n_ctx;
-    }
+    max_n_kv = std::min(max_n_kv, cc->kv_cache.n_ctx);
 
-    if (cc->compute_ctx != nullptr) {
-        ggml_free(cc->compute_ctx);
-        cc->compute_ctx = nullptr;
-    }
-    {
+    // (Re)build the step graph for an attention width of max_n_kv.
+    StepBuild  sb;
+    const auto build_step = [&]() -> transcribe_status {
+        if (cc->compute_ctx != nullptr) {
+            ggml_free(cc->compute_ctx);
+            cc->compute_ctx = nullptr;
+        }
         ggml_init_params ip{};
         ip.mem_size     = 16 * 1024 * 1024;
         ip.no_alloc     = true;
@@ -948,28 +954,53 @@ transcribe_status run(transcribe_session *          session,
             transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "voxtral run: ggml_init (step) failed — out of memory.");
             return TRANSCRIBE_ERR_OOM;
         }
+        sb = build_step_graph(cc->compute_ctx, cm->weights, cm->hparams, cc->kv_cache, max_n_kv, cc->decoder_use_flash);
+        if (sb.graph == nullptr || sb.out == nullptr) {
+            return TRANSCRIBE_ERR_GGUF;
+        }
+        ggml_backend_sched_reset(cc->sched);
+        if (!ggml_backend_sched_alloc_graph(cc->sched, sb.graph)) {
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                                "voxtral run: step graph allocation failed — out of memory. "
+                                "Lower transcribe_session_params.n_ctx or shorten the audio.");
+            return TRANSCRIBE_ERR_OOM;
+        }
+        set_sched_threads(cc->sched, cc->n_threads);
+        return TRANSCRIBE_OK;
+    };
+    if (const transcribe_status st = build_step(); st != TRANSCRIBE_OK) {
+        return st;
     }
-    StepBuild sb =
-        build_step_graph(cc->compute_ctx, cm->weights, cm->hparams, cc->kv_cache, max_n_kv, cc->decoder_use_flash);
-    if (sb.graph == nullptr || sb.out == nullptr) {
-        return TRANSCRIBE_ERR_GGUF;
-    }
-    ggml_backend_sched_reset(cc->sched);
-    if (!ggml_backend_sched_alloc_graph(cc->sched, sb.graph)) {
-        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
-                            "voxtral run: step graph allocation failed — out of memory. "
-                            "Lower transcribe_session_params.n_ctx or shorten the audio.");
-        return TRANSCRIBE_ERR_OOM;
-    }
-    set_sched_threads(cc->sched, cc->n_threads);
 
     const ggml_fp16_t        mz = ggml_fp32_to_fp16(0.0f);
     const ggml_fp16_t        mn = ggml_fp32_to_fp16(-INFINITY);
     std::vector<ggml_fp16_t> step_mask(max_n_kv, mn);
     bool                     repeating = false;
-    while (next_tok != eos_id && static_cast<int32_t>(generated_ids.size()) < max_new && cur_past + 1 <= max_n_kv) {
+    while (next_tok != eos_id && static_cast<int32_t>(generated_ids.size()) < max_new) {
         if (cc->poll_abort()) {
             return TRANSCRIBE_ERR_ABORTED;
+        }
+        if (cur_past + 1 > max_n_kv) {
+            // Out of attention width: widen (doubling, capped at the ceiling),
+            // growing the KV cache first when it is the limit.
+            if (max_n_kv >= model_max) {
+                break;
+            }
+            max_n_kv = std::min(max_n_kv * 2, model_max);
+            if (cc->kv_cache.n_ctx < max_n_kv &&
+                !causal_lm::kv_grow(cc->kv_cache, cm->plan.primary,
+                                    causal_lm::pick_kv_cache_context(max_n_kv, model_max), cm->hparams.dec_n_kv_heads,
+                                    cm->hparams.dec_head_dim, cm->hparams.dec_n_layers)) {
+                transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                                    "voxtral run: KV cache growth to %d positions failed — out of memory. "
+                                    "Lower transcribe_session_params.n_ctx.",
+                                    max_n_kv);
+                return TRANSCRIBE_ERR_OOM;
+            }
+            if (const transcribe_status st = build_step(); st != TRANSCRIBE_OK) {
+                return st;
+            }
+            step_mask.resize(max_n_kv, mn);
         }
         ggml_backend_tensor_set(sb.input_id_in, &next_tok, 0, sizeof(int32_t));
         const int32_t pos_val = cur_past;
@@ -1085,8 +1116,11 @@ transcribe_status run_batch(transcribe_session *          session,
     }
 
     // The batched encoder + causal_lm batched blocks are flash-only; dump mode
-    // and n==1 take the established single-shot path for byte-parity.
-    if (!cc->decoder_use_flash || !cc->encoder_use_flash || transcribe::debug::enabled() || n == 1) {
+    // and n==1 take the established single-shot path for byte-parity. Free
+    // text (INSTRUCT) grows its KV cache per utterance, which the packed
+    // batched cache cannot, so it runs serially too.
+    if (!cc->decoder_use_flash || !cc->encoder_use_flash || transcribe::debug::enabled() || n == 1 ||
+        (params != nullptr && params->task == TRANSCRIBE_TASK_INSTRUCT)) {
         return run_batch_serial(cc, pcm, n_samples, n, params);
     }
 
