@@ -664,11 +664,9 @@ namespace {
 
 constexpr size_t k_no_match = static_cast<size_t>(-1);
 
-// Collect pretoken end offsets (in codepoints) for the Tekken regex.
-// Unlike the Qwen2 / granite walkers, the two letter alternatives are
-// case-aware and can fail after partially matching, so each one is
-// evaluated as a small backtracking matcher that reproduces the regex
-// engine's first-match choice.
+// Pretoken end offsets (in codepoints) for the Tekken regex. The letter
+// alternatives can fail after a partial match, so each is a small
+// backtracking matcher.
 std::vector<size_t> tekken_split_offsets(const std::vector<uint32_t> & cpts, size_t begin, size_t end) {
     std::vector<size_t> out;
 
@@ -704,11 +702,8 @@ std::vector<size_t> tekken_split_offsets(const std::vector<uint32_t> & cpts, siz
         return get_cpt(p) != OOR && !f.is_whitespace() && !f.is_letter() && !f.is_number();
     };
 
-    // UPPER* LOWER+ starting at `s`. UPPER* is greedy; if LOWER+ cannot
-    // follow the full upper run, the engine gives codepoints back one at
-    // a time until LOWER+ matches, i.e. at the last codepoint of the run
-    // that is in both classes (Lm / Lo / M). LOWER+ then stops right
-    // after it, since everything later in the run is upper-only.
+    // UPPER* LOWER+ starting at `s`. If no LOWER follows the upper run,
+    // backtrack to the last codepoint in the run that is in both classes.
     auto match_upper_star_lower_plus = [&](size_t s) -> size_t {
         size_t i = s;
         while (is_upper_class(i)) {

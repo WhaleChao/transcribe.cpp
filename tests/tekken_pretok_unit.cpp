@@ -1,16 +1,8 @@
 // tekken_pretok_unit.cpp - pure-host test of the Tekken (Mistral /
 // Voxtral) pretokenizer split, no model required.
 //
-// Expected splits are regex.findall(pattern, text) with the pattern from
-// Voxtral-Mini-3B-2507's tekken.json, except where the splitter's
-// ASCII-only case deliberately keeps a non-ASCII case change in one
-// pretoken (marked below; see pretokenize_tekken). The splitter was
-// also checked token-for-token against mistral-common's Tekkenizer (see
-// voxtral_tokenize_parity.cpp for the model-gated id check).
-//
-// Cases cover what distinguishes Tekken from the Qwen2 fallback it
-// replaced: case-split letter runs, no contraction alternative, combining
-// marks joining letter runs, and the `[\r\n/]*` symbol-run tail.
+// Expected splits are regex.findall() with the tekken.json pattern,
+// except the ASCII-only case cases marked below.
 
 #include "transcribe-unicode.h"
 

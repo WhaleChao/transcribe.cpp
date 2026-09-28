@@ -184,25 +184,11 @@ std::vector<std::string> pretokenize_granite(const std::string & text);
 //   | \s+ (?!\S)
 //   | \s+
 //
-// Differences from the Qwen2 variant:
-//   1. No contraction alternative.
-//   2. Letter runs split on case: a word is an upper run followed by
-//      a lower run, so "iPhone" -> "i", "Phone" while "HTTPServer"
-//      stays whole (upper run "HTTPS", lower run "erver").
-//   3. Combining marks (\p{M}) join letter runs, so abugida words
-//      (Devanagari, Thai, ...) stay one pretoken.
-//   4. Symbol runs swallow a trailing `[\r\n/]*`.
-//
-// Case is ASCII-only, as in llama.cpp's Tekken regex: A-Z is upper,
-// a-z is lower, and every other letter is in both classes (like
-// \p{Lm} / \p{Lo}), so a non-ASCII lower->UPPER change inside a word
-// does not split. That avoids a Unicode case table and rarely changes
-// the ids: against mistral-common's Tekkenizer, only glued words like
-// "нужноМАНА" differ (17 of ~770k vocab-derived stress strings; none in
-// ordinary text). Unlike llama.cpp, marks join letter runs, which the
-// ids do depend on (Devanagari, Thai, ...).
-//
-// Reference: mistral-common Tekkenizer (tiktoken, Rust fancy-regex).
+// Case is ASCII-only: A-Z is upper, a-z is lower, other letters are
+// both. So "iPhone" -> "i", "Phone", but a non-ASCII case change inside
+// a word does not split (rare; e.g. "нужноМАНА" differs from
+// mistral-common). Combining marks join letter runs, so Devanagari /
+// Thai words stay whole.
 std::vector<std::string> pretokenize_tekken(const std::string & text);
 
 }  // namespace transcribe::unicode

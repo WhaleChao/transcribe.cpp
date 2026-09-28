@@ -2,12 +2,8 @@
 // transcribe_tokenize() on a Voxtral GGUF produces the same token ids as
 // mistral-common's Tekkenizer.
 //
-// Expected ids come from Voxtral-Mini-3B-2507's tekken.json:
-//   Tekkenizer.from_file(...).encode(text, bos=False, eos=False)
-// This checks both the Tekken pretokenizer and the gpt2-style merges
-// convert-voxtral.py rebuilds from Tekken's ranks. Several cases (the
-// Devanagari / Thai / combining-mark ones) tokenize differently under
-// the Qwen2 pretokenizer that Voxtral used before "tekken" was wired up.
+// Expected ids: Tekkenizer.from_file(tekken.json).encode(text, bos=False,
+// eos=False) for Voxtral-Mini-3B-2507.
 //
 // Gated by TRANSCRIBE_VOXTRAL_GGUF. Exits 77 (cmake SKIP_RETURN_CODE)
 // when unset.
