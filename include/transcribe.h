@@ -1107,6 +1107,29 @@ TRANSCRIBE_API void transcribe_session_params_init(struct transcribe_session_par
  *              ext` as field 0. Use transcribe_model_accepts_ext_kind
  *              to probe whether the loaded model accepts a given kind
  *              before pointing `family` at it.
+ *
+ * spec_k_drafts: speculative-decode draft length for offline runs: -1 is
+ *              the model default, 0 disables it, >0 drafts K tokens per
+ *              verify pass. Ignored unless the model reports
+ *              transcribe_capabilities::supports_spec_decode.
+ *
+ * Generic prompting (vocabulary, prompt, prefix): NULL / 0 / "" means
+ * unused. Each field is gated by the TRANSCRIBE_FEATURE_* bit in
+ * parentheses; limits are in docs/prompting.md.
+ *
+ * vocabulary / n_vocabulary: custom terms in priority order, formatted for
+ *              the family (VOCABULARY). Ignored with a WARN when
+ *              unsupported.
+ *
+ * prompt:      context text under TRANSCRIBE / TRANSLATE (CONTEXT_PROMPT),
+ *              ignored with a WARN when unsupported; the required
+ *              instruction under INSTRUCT. Plain text only: control-token
+ *              literals are rejected.
+ *
+ * prefix:      transcript text the model continues from
+ *              (TRANSCRIPT_PREFIX). Results hold only the continuation,
+ *              except raw_text. An error when unsupported, and under
+ *              INSTRUCT, batch or streaming.
  */
 struct transcribe_run_params {
     uint64_t struct_size;
@@ -1120,47 +1143,8 @@ struct transcribe_run_params {
     const char *                  target_language;
     bool                          keep_special_tags;
     const struct transcribe_ext * family;
+    int32_t                       spec_k_drafts;
 
-    /*
-     * spec_k_drafts: n-gram-lookup speculative-decode draft length for the
-     *   offline autoregressive decode step. Family-portable strategy knob;
-     *   the family decides how K maps to its internal verify graph.
-     *
-     *   Convention:
-     *     -1: family default (each family picks its tuned K).
-     *      0: spec decoding explicitly disabled — standard 1-token-per-step
-     *         autoregression. Use this for byte-equal reproduction of
-     *         pre-spec behavior or when measuring baseline performance.
-     *     >0: draft K tokens per verify pass. Practical range is 1..8;
-     *         optimal K is hardware-dependent (compute-bound hardware
-     *         prefers small K, bandwidth-bound prefers larger K — see
-     *         docs/models/<family>.md for per-family guidance).
-     *
-     *   Families gate this via transcribe_capabilities::supports_spec_decode.
-     *   Setting spec_k_drafts != -1 on a family with
-     *   supports_spec_decode == false is silently ignored (the run proceeds
-     *   as ordinary autoregression). Probe the capability bit if you want
-     *   to know whether the field will take effect.
-     */
-    int32_t spec_k_drafts;
-
-    /*
-     * Generic prompting. NULL / 0 / "" means unused. Each field is gated
-     * by the TRANSCRIBE_FEATURE_* bit named below; limits are in
-     * docs/prompting.md.
-     *
-     * vocabulary / n_vocabulary: custom terms in priority order, formatted
-     *   for the family (VOCABULARY). Ignored with a WARN when unsupported.
-     *
-     * prompt: context text under TRANSCRIBE / TRANSLATE (CONTEXT_PROMPT),
-     *   ignored with a WARN when unsupported; the required instruction
-     *   under INSTRUCT. Plain text only: control-token literals are
-     *   rejected.
-     *
-     * prefix: transcript text the model continues from (TRANSCRIPT_PREFIX).
-     *   Results hold only the continuation, except raw_text. An error when
-     *   unsupported, and under INSTRUCT, batch or streaming.
-     */
     const char * const * vocabulary;
     int32_t              n_vocabulary;
     const char *         prompt;
@@ -1244,14 +1228,8 @@ struct transcribe_capabilities {
     bool supports_streaming;
 
     /*
-     * supports_spec_decode: gates transcribe_run_params::spec_k_drafts.
-     *   True means the family's offline (transcribe_run / transcribe_run_batch)
-     *   path implements n-gram-lookup speculative decoding. A non-zero
-     *   spec_k_drafts on a model with supports_spec_decode == false is
-     *   silently ignored — the run proceeds as ordinary autoregression. This
-     *   is a soft gate (no error) because spec is purely a performance
-     *   strategy; callers can probe this bit if they want to know whether
-     *   passing K will actually do anything.
+     * supports_spec_decode: the offline path honors
+     *   transcribe_run_params::spec_k_drafts; elsewhere it is ignored.
      */
     bool supports_spec_decode;
 

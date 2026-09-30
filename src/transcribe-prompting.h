@@ -2,10 +2,8 @@
 // (transcribe_run_params::vocabulary / prompt / prefix, TASK_INSTRUCT).
 //
 // INTERNAL. The dispatcher validates the fields and removes the ones a model
-// ignores before a family sees them, so a family acts on whatever is set in
-// the params view it receives. Families own the rendering (where the text
-// goes in their prompt) and their budget rules; these helpers cover the parts
-// every family shares.
+// ignores, so a family acts on whatever is set in the params view it
+// receives. Families own the rendering and their budget rules.
 
 #pragma once
 
@@ -38,11 +36,10 @@ std::string join(const std::vector<std::string> & terms, const char * sep);
 // `s` without leading / trailing whitespace (std::isspace).
 std::string strip(const std::string & s);
 
-// Rejects user text containing a literal of one of the tokenizer's control
-// tokens (e.g. "<|im_end|>", "[INST]"). The encoders never produce control
-// ids from text, but the upstream reference tokenizers do, so accepting such
-// text would silently diverge from the reference and could close a chat
-// turn. `what` names the field in the error log. Returns INVALID_ARG on a hit.
+// Returns INVALID_ARG when `text` contains a literal of one of the
+// tokenizer's control tokens (e.g. "<|im_end|>", "[INST]"): the upstream
+// tokenizers would encode it as a control id, ours never do. `what` names
+// the field in the error log.
 transcribe_status check_plain_text(const Tokenizer & tok, const std::string & text, const char * what);
 
 // check_plain_text + encode.
@@ -51,19 +48,14 @@ transcribe_status encode_plain(const Tokenizer &      tok,
                                std::vector<int32_t> & out_ids,
                                const char *           what);
 
-// Tokenized vocabulary + context for one text slot, fitted to a budget.
+// Tokenized vocabulary + context for one text slot, fitted to `budget`
+// tokens (negative = 0). Terms render as `lead + join(terms, sep) + trail`;
+// the context is encoded as given. Over budget, the context is trimmed
+// first, keeping its most recent tokens, then terms are dropped from the end
+// of the list, with one WARN. Both are control-token checked.
 //
-// Terms render as `lead + join(terms, sep) + trail`; the context is encoded
-// as given (the caller includes any separator it needs, e.g. a leading
-// space). When both exceed `budget` tokens the context is trimmed first,
-// keeping its most recent tokens, then terms are dropped from the end of the
-// list (the spec's overflow order), with one WARN naming what was dropped.
-// A negative budget is treated as 0. Terms and context are control-token
-// checked.
-//
-// The result depends on the budget only through what it forces out: when the
-// fit for budget B1 is at most B2 < B1 tokens, the fit for B2 is identical.
-// Batch paths rely on this to share one fit across rows (see n_tokens()).
+// A fit that comes in under a smaller budget is also the fit for that
+// budget; batch paths rely on this to share one fit across rows.
 struct TermsFormat {
     std::string lead;
     std::string sep;

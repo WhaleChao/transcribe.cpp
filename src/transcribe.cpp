@@ -403,10 +403,9 @@ transcribe_status validate_run_params_common(const transcribe_session * session,
     return validate_prompting(session->model, params);
 }
 
-// Shape and hard-gate checks for the generic prompting fields. `params` is
-// a normalized (full-size) view, so the trailing fields are always readable.
-// Soft inputs a model ignores are removed later by prepare_prompting;
-// everything here is a caller error that must preserve the prior snapshot.
+// Shape and hard-gate checks for the generic prompting fields, on a
+// normalized view. Soft inputs a model ignores are removed later by
+// prepare_prompting.
 transcribe_status validate_prompting(const transcribe_model * model, const transcribe_run_params * params) {
     auto reject = [](transcribe_status st, const char * why) {
         transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "transcribe_run: %s", why);
@@ -426,10 +425,8 @@ transcribe_status validate_prompting(const transcribe_model * model, const trans
             return reject(TRANSCRIBE_ERR_UNSUPPORTED_TASK,
                           "this model does not support TRANSCRIBE_TASK_INSTRUCT (TRANSCRIBE_FEATURE_INSTRUCT)");
         }
-        // The instruction defines the task; there is nothing to run without
-        // it. Output is free text, so there is no target language and no
-        // alignment to return. Prefix-as-answer-prefill is untested on
-        // every INSTRUCT family, so it is rejected until one measures it.
+        // Output is free text: no target language and no alignment. A prefix
+        // as answer prefill is untested on every INSTRUCT family.
         if (!transcribe::prompting::has_text(params->prompt)) {
             return reject(TRANSCRIBE_ERR_INVALID_ARG, "TRANSCRIBE_TASK_INSTRUCT requires a non-empty prompt");
         }
@@ -453,10 +450,9 @@ transcribe_status validate_prompting(const transcribe_model * model, const trans
     return TRANSCRIBE_OK;
 }
 
-// Control-token literals in the prompting text a family will act on, checked
-// with the model's tokenizer before the result snapshot is cleared (the
-// family re-checks when it encodes). Runs after strip_ignored_prompting, so
-// ignored inputs are not rejected.
+// Rejects control-token literals in the prompting text before the result
+// snapshot is cleared. Runs after strip_ignored_prompting, so ignored inputs
+// are not rejected.
 transcribe_status check_prompting_text(const transcribe_model * model, const transcribe_run_params * params) {
     const transcribe::Tokenizer * tok = model->tokenizer();
     if (tok == nullptr) {
@@ -491,11 +487,8 @@ void normalize_run_params(const transcribe_run_params * in, transcribe_run_param
 }
 
 // Warn about, then remove, the soft prompting inputs this model ignores, so
-// a family only ever sees inputs it should act on. Runs on a validated
-// normalized view (validate_prompting has already rejected INSTRUCT on a
-// model without the feature). Idempotent: a stripped view warns nothing the
-// second time (the batch serial fallback re-enters run_one_inner per
-// utterance).
+// a family only ever sees inputs it should act on. Idempotent: the batch
+// serial fallback re-enters run_one_inner per utterance.
 void strip_ignored_prompting(const transcribe_model * model, transcribe_run_params * params) {
     const char * arch_name = (model->arch != nullptr && model->arch->name != nullptr) ? model->arch->name : "(unknown)";
     const bool   instruct  = params->task == TRANSCRIBE_TASK_INSTRUCT;
@@ -524,9 +517,8 @@ void strip_ignored_prompting(const transcribe_model * model, transcribe_run_para
     }
 }
 
-// The pre-clear prompting step every entry point shares: drop the soft inputs
-// the model ignores, then reject control-token literals in what remains.
-// `params` is the entry point's normalized view, already validated.
+// The pre-clear prompting step every entry point shares, on a validated
+// normalized view.
 transcribe_status prepare_prompting(const transcribe_model * model, transcribe_run_params * params) {
     strip_ignored_prompting(model, params);
     return check_prompting_text(model, params);
