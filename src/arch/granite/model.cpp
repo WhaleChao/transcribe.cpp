@@ -708,13 +708,13 @@ static transcribe_status build_granite_affixes(GraniteModel *                cm,
                         "or speaker attribution)");
                 return TRANSCRIBE_ERR_INVALID_ARG;
             }
-            std::vector<int32_t> prefix_ids;
+            std::vector<int32_t> transcript_prefix_ids;
             if (const transcribe_status st =
-                    transcribe::prompting::encode_plain(cm->tok, params->prefix, prefix_ids, "prefix");
+                    transcribe::prompting::encode_plain(cm->tok, params->prefix, transcript_prefix_ids, "prefix");
                 st != TRANSCRIBE_OK) {
                 return st;
             }
-            suffix_ids.insert(suffix_ids.end(), prefix_ids.begin(), prefix_ids.end());
+            suffix_ids.insert(suffix_ids.end(), transcript_prefix_ids.begin(), transcript_prefix_ids.end());
         }
     } else {
         const std::string prefix_text = "USER: ";

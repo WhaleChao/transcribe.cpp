@@ -1318,7 +1318,7 @@ transcribe_status run_batch(transcribe_session *          session,
     const int                         ctx_ceiling = voxtral_context_ceiling(cc->n_ctx, hp);
     std::vector<std::vector<int32_t>> prompt_ids(n);
     std::vector<int>                  T_prompt(n, 0), T_audio(n, 0);
-    int                               prefix_len = 0, suffix_len = 0;
+    int                               prefix_len = 0;
     for (int b = 0; b < n; ++b) {
         if (!valid[b]) {
             continue;
@@ -1345,8 +1345,7 @@ transcribe_status run_batch(transcribe_session *          session,
             over_length[b] = 1;
             continue;
         }
-        prefix_len  = pfx;
-        suffix_len  = sfx;  // uniform across the batch
+        prefix_len  = pfx;  // uniform across the batch
         T_prompt[b] = t_prompt;
         T_audio[b]  = n_audio;
     }
