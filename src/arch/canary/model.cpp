@@ -1012,7 +1012,6 @@ transcribe_status run(transcribe_session *          session,
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
     const int prompt_len = static_cast<int>(prompt_ids.size());
-    transcribe::prompting::dump_rendered(cm->tok, prompt_ids, -1, "canary");
     // Backstop for run_validate's pre-clear bound: never prefill past the KV.
     if (const transcribe_status st = check_prompt_fits(prompt_len, canary_context_ceiling(cc->n_ctx, cm->hparams));
         st != TRANSCRIBE_OK) {

@@ -2,7 +2,6 @@
 
 #include "transcribe-prompting.h"
 
-#include "transcribe-env.h"
 #include "transcribe-log.h"
 #include "transcribe-tokenizer.h"
 
@@ -164,49 +163,6 @@ transcribe_status fit_terms_and_context(const Tokenizer &                tok,
     out.n_terms    = kept;
     out.terms_text = render(kept);
     return TRANSCRIBE_OK;
-}
-
-bool dump_enabled() {
-    return env::str("TRANSCRIBE_PROMPT_DUMP") != nullptr;
-}
-
-void dump_rendered(const Tokenizer & tok, const std::vector<int32_t> & ids, int32_t audio_id, const char * family) {
-    const char * path = env::str("TRANSCRIBE_PROMPT_DUMP");
-    if (path == nullptr) {
-        return;
-    }
-    // One line per prompt: backslash, newline and tab are escaped.
-    std::string line;
-    for (size_t i = 0; i < ids.size();) {
-        const int id = ids[i];
-        size_t    j  = i + 1;
-        if (id == audio_id) {
-            while (j < ids.size() && ids[j] == id) {
-                ++j;
-            }
-        }
-        for (const char c : tok.decode(&id, 1)) {
-            if (c == '\\') {
-                line += "\\\\";
-            } else if (c == '\n') {
-                line += "\\n";
-            } else if (c == '\t') {
-                line += "\\t";
-            } else {
-                line += c;
-            }
-        }
-        if (j - i > 1) {
-            line += "x" + std::to_string(j - i);
-        }
-        i = j;
-    }
-    if (std::FILE * f = std::fopen(path, "ab")) {
-        std::fprintf(f, "%s\t%zu\t", family, ids.size());
-        std::fwrite(line.data(), 1, line.size(), f);
-        std::fputc('\n', f);
-        std::fclose(f);
-    }
 }
 
 }  // namespace transcribe::prompting

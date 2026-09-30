@@ -764,7 +764,6 @@ transcribe_status run(transcribe_session *          session,
         }
     }
     const int T_prompt = static_cast<int>(prompt_ids.size());
-    transcribe::prompting::dump_rendered(cm->tok, prompt_ids, cm->hparams.audio_token_id, "voxtral");
 
     // ----- Input-length gate (see docs/input-limits.md) -----
     // Auto-size the KV cache to this utterance (grow to fit, capped at the

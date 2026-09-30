@@ -1890,9 +1890,6 @@ transcribe_status whisper_run(transcribe_session *          session,
             prompt_ids.insert(prompt_ids.end(), prefix_ids.begin(), prefix_ids.end());
         }
         const int seq_len = static_cast<int>(prompt_ids.size());
-        if (is_first_chunk) {
-            transcribe::prompting::dump_rendered(cm->tok, prompt_ids, -1, "whisper");
-        }
 
         // Position of the SOT token within the prefix. Used to read the
         // no-speech logits row from the prompt-pass (HF's

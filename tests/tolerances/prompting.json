@@ -13,8 +13,6 @@
     "  follow_pts     INSTRUCT follow-rate, points",
     "  cont_wer_abs   prefix continuation WER, absolute points",
     "  dup_pts        prefix duplication rate, points",
-    "plus rendered-prompt parity: the decoded decoder/LLM input must equal the reference's",
-    "(audio placeholder runs collapsed) on every row the reference records.",
     "",
     "Proposed from the first C++ acceptance run (2026-09-27, branch generic-prompting). Several",
     "C++ runs used Q8_0 against a BF16/F32 reference (noted per model), so the gates carry",

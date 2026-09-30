@@ -773,7 +773,6 @@ transcribe_status run(transcribe_session *          session,
         return st;
     }
     build_prompt_tokens(cm->hparams, cm->chat_tokens, T_enc, system_ids, lang_prefix_ptr, prompt_ids, audio_positions);
-    transcribe::prompting::dump_rendered(cm->tok, prompt_ids, cm->hparams.audio_token_id, "qwen3_asr");
     const int T_prompt   = static_cast<int>(prompt_ids.size());
     const int prefix_len = audio_positions.empty() ? 0 : static_cast<int>(audio_positions.front());
     const int suffix_len = T_prompt - prefix_len - T_enc;

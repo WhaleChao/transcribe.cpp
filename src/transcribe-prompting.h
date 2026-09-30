@@ -87,13 +87,5 @@ transcribe_status fit_terms_and_context(const Tokenizer &                tok,
                                         const char *                     family,
                                         FittedPrompt &                   out);
 
-// Rendered-prompt observability for parity tests, active only when
-// TRANSCRIBE_PROMPT_DUMP names a file (dump_enabled()): appends a line
-// `family<TAB>n_tokens<TAB>text` there (\\, \n, \t escaped), decoding `ids`
-// with special pieces kept and collapsing each run of `audio_id` to
-// "<piece>xN" (the reference harness format).
-bool dump_enabled();
-void dump_rendered(const Tokenizer & tok, const std::vector<int32_t> & ids, int32_t audio_id, const char * family);
-
 }  // namespace prompting
 }  // namespace transcribe

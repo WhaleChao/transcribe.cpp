@@ -839,7 +839,6 @@ transcribe_status run(transcribe_session *          session,
         prompt_ids.resize(prompt_ids.size() - cm->hparams.prompt_suffix_tokens.size());
         prompt_ids.insert(prompt_ids.end(), suffix.begin(), suffix.end());
     }
-    transcribe::prompting::dump_rendered(cm->tok, prompt_ids, cm->hparams.audio_token_id, "moss");
     const int T_prompt = static_cast<int>(prompt_ids.size());
     if (static_cast<int>(audio_positions.size()) != T_enc) {
         log_msg(TRANSCRIBE_LOG_LEVEL_ERROR, "moss run: audio_positions(%zu) != T_enc(%d)", audio_positions.size(),

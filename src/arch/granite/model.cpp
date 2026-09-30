@@ -1143,12 +1143,6 @@ transcribe_status run(transcribe_session *          ctx_base,
         input_ids.push_back(0);
     }
     input_ids.insert(input_ids.end(), suffix_ids.begin(), suffix_ids.end());
-    if (transcribe::prompting::dump_enabled()) {
-        std::vector<int32_t> rendered = input_ids;
-        std::fill(rendered.begin() + prefix_len, rendered.begin() + prefix_len + n_audio_tokens,
-                  cm->hparams.audio_token_id);
-        transcribe::prompting::dump_rendered(cm->tok, rendered, cm->hparams.audio_token_id, "granite");
-    }
 
     // Input-length gate. The decoder context window is the binding limit:
     // audio tokens + prompt + generation must fit dec_max_position_embeddings

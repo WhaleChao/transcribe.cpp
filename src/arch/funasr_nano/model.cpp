@@ -707,7 +707,6 @@ transcribe_status run(transcribe_session *          session,
         st != TRANSCRIBE_OK) {
         return st;
     }
-    transcribe::prompting::dump_rendered(cm->tok, prompt_ids, 0, "funasr_nano");
 
     const int T_prompt   = static_cast<int>(prompt_ids.size());
     const int T_audio    = fake_token_len;
