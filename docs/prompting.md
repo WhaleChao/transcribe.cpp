@@ -1,8 +1,7 @@
 # Prompting
 
 Generic prompting fields on `transcribe_run_params` (CLI flag in parentheses).
-The full contract is the comment on those fields in `include/transcribe.h`;
-probe `transcribe_model_supports()` for the matching feature bit.
+Probe `transcribe_model_supports()` for the matching feature bit.
 
 | Field | Feature bit | Effect |
 |---|---|---|
@@ -24,3 +23,15 @@ probe `transcribe_model_supports()` for the matching feature bit.
 
 Per-model formats and restrictions are in each model doc's **Prompting:**
 note under [`models/`](models/).
+
+## Limits
+
+- Over the prompt budget, `vocabulary` drops terms from the end of the list and
+  `prompt` keeps its most recent text, both with a WARN. An INSTRUCT prompt
+  that does not fit is an error.
+- INSTRUCT requires `target_language == NULL` and timestamps NONE or AUTO.
+- `prefix`: the audio must contain the prefix's speech, and long-form models
+  apply it to the first window only.
+- A feature bit covers plain transcription. Under another task or output mode
+  a model may ignore `vocabulary` or `prompt` with a WARN; its model doc says
+  when.

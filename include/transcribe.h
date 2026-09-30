@@ -446,12 +446,8 @@ TRANSCRIBE_API void transcribe_log_set(transcribe_log_callback cb, void * userda
 /* Task / timestamps                                                       */
 /* ----------------------------------------------------------------------- */
 
-/*
- * INSTRUCT: transcribe_run_params::prompt replaces the model's task
- * instruction and the output is free text (only full_text / raw_text are
- * guaranteed). Gated by TRANSCRIBE_FEATURE_INSTRUCT; offline only. See
- * transcribe_run_params for the full contract.
- */
+/* INSTRUCT: transcribe_run_params::prompt is the instruction and the output
+ * is free text (only full_text / raw_text are guaranteed). Offline only. */
 typedef enum {
     TRANSCRIBE_TASK_TRANSCRIBE = 0,
     TRANSCRIBE_TASK_TRANSLATE  = 1,
@@ -1149,50 +1145,21 @@ struct transcribe_run_params {
     int32_t spec_k_drafts;
 
     /*
-     * Generic prompting. All default to NULL / 0 (no prompting input).
-     * Probe transcribe_model_supports() for the matching feature bit; the
-     * bits describe where the text goes, not what the model does with it.
+     * Generic prompting. NULL / 0 / "" means unused. Each field is gated
+     * by the TRANSCRIBE_FEATURE_* bit named below; limits are in
+     * docs/prompting.md.
      *
-     * vocabulary / n_vocabulary: custom terms, in priority order. The
-     *   library formats them for the family (TRANSCRIBE_FEATURE_VOCABULARY);
-     *   callers who want their own format leave this empty and put text in
-     *   `prompt`. Rendered terms precede `prompt` on models with a single
-     *   text slot. Without the feature (under any task) the terms are
-     *   ignored with a WARN.
-     *   When the family's prompt budget overflows, terms are dropped from
-     *   the end of the list with a WARN. n_vocabulary < 0, a NULL array
-     *   with n_vocabulary > 0, or a NULL entry is TRANSCRIBE_ERR_INVALID_ARG.
-     *   Empty terms are skipped.
+     * vocabulary / n_vocabulary: custom terms in priority order, formatted
+     *   for the family (VOCABULARY). Ignored with a WARN when unsupported.
      *
-     * prompt: under TRANSCRIBE / TRANSLATE, context text placed verbatim in
-     *   the model's conditioning slot (TRANSCRIBE_FEATURE_CONTEXT_PROMPT);
-     *   without the feature it is ignored with a WARN, and on budget
-     *   overflow the most recent text is kept with a WARN. Under INSTRUCT,
-     *   the required instruction: NULL or empty is
-     *   TRANSCRIBE_ERR_INVALID_ARG, and one that does not fit the model's
-     *   budget is an error. The library never rewrites `prompt` and always
-     *   tokenizes it as plain text: control-token literals such as <|...|>
-     *   are rejected with TRANSCRIBE_ERR_INVALID_ARG.
+     * prompt: context text under TRANSCRIBE / TRANSLATE (CONTEXT_PROMPT),
+     *   ignored with a WARN when unsupported; the required instruction
+     *   under INSTRUCT. Plain text only: control-token literals are
+     *   rejected.
      *
-     * INSTRUCT additionally requires target_language == NULL and timestamps
-     * NONE or AUTO (TRANSCRIBE_ERR_INVALID_ARG otherwise), and is rejected
-     * by transcribe_stream_begin (TRANSCRIBE_ERR_UNSUPPORTED_TASK).
-     *
-     * prefix: transcript text the model continues from, as if it had already
-     *   emitted it (TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX). The audio must
-     *   contain the prefix's speech. full_text, segments and words hold only
-     *   the continuation, and timestamps start after the prefix; raw_text
-     *   holds prefix + continuation. For long-form families it applies to
-     *   the first window only. When a family's timestamps do not compose
-     *   with a prefix, timestamps AUTO resolves to NONE and an explicit
-     *   granularity is TRANSCRIBE_ERR_INVALID_ARG (Whisper). Unlike the soft
-     *   inputs above, a non-empty
-     *   prefix is an error when unsupported (TRANSCRIBE_ERR_INVALID_ARG):
-     *   ignoring it would silently repeat the prefix's words. It is also
-     *   rejected under INSTRUCT, by transcribe_run_batch (one shared params
-     *   across different audio) and by transcribe_stream_begin.
-     *
-     * An empty-string prompt or prefix is treated as absent.
+     * prefix: transcript text the model continues from (TRANSCRIPT_PREFIX).
+     *   Results hold only the continuation, except raw_text. An error when
+     *   unsupported, and under INSTRUCT, batch or streaming.
      */
     const char * const * vocabulary;
     int32_t              n_vocabulary;
@@ -1427,28 +1394,14 @@ TRANSCRIBE_API transcribe_status transcribe_model_get_capabilities(const struct 
  *                        against a model where this returns false emits
  *                        a WARN and proceeds.
  *
- *   VOCABULARY           transcribe_run_params::vocabulary is formatted
- *                        for this model and reaches its prompt.
+ *   VOCABULARY           transcribe_run_params::vocabulary takes effect.
  *
- *   CONTEXT_PROMPT       transcribe_run_params::prompt reaches a
- *                        transcription-conditioning slot verbatim under
- *                        TRANSCRIBE / TRANSLATE. The effect depends on
- *                        the model.
+ *   CONTEXT_PROMPT       transcribe_run_params::prompt conditions
+ *                        TRANSCRIBE / TRANSLATE.
  *
- *   INSTRUCT             TRANSCRIBE_TASK_INSTRUCT is available:
- *                        transcribe_run_params::prompt replaces the task
- *                        instruction and the output is free text.
+ *   INSTRUCT             TRANSCRIBE_TASK_INSTRUCT is available.
  *
- *   TRANSCRIPT_PREFIX    transcribe_run_params::prefix is honored as
- *                        forced decoder text.
- *
- * The prompting bits are advertised only where the behavior is documented
- * upstream or measured, not merely where the model accepts text. A bit
- * guarantees the input takes effect in plain transcription; under another
- * task or output mode a family may ignore a soft input (vocabulary, context
- * prompt) with a WARN where its model doc lists the combination as
- * unsupported. A transcript prefix the model cannot honor is always an
- * error.
+ *   TRANSCRIPT_PREFIX    transcribe_run_params::prefix is honored.
  *
  * Returns false on NULL model or unknown feature enum.
  */
