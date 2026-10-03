@@ -179,6 +179,28 @@ def test_run_while_stream_active_rejected(streaming_model_path, audio_pcm):
     assert "country" in committed.lower(), committed
 
 
+def test_rejected_feed_keeps_stream_active(streaming_model_path, audio_pcm):
+    # Non-finite PCM is rejected BEFORE the family hook: the feed raises
+    # InvalidArgument but the native stream stays ACTIVE (only failures
+    # inside the hook move it to FAILED). The binding must release the
+    # model's compute lock on that error and leave the stream usable.
+    with t.Model(streaming_model_path) as model, model.session() as session:
+        with session.stream() as stream:
+            stream.feed(audio_pcm[:16000])
+            bad = list(audio_pcm[16000:32000])
+            bad[100] = float("nan")
+            with pytest.raises(t.InvalidArgument):
+                stream.feed(bad)
+            assert stream.state == "active"
+            assert not model._compute_lock.locked()
+            for i in range(16000, len(audio_pcm), 16000):
+                stream.feed(audio_pcm[i : i + 16000])
+            update = stream.finalize()
+            committed = stream.text().committed
+    assert update.is_final
+    assert "country" in committed.lower(), committed
+
+
 def test_stream_begin_clears_pending_cancel(streaming_model_path, audio_pcm):
     # A cancel() requested before stream() is cleared by the begin: the new
     # stream's feeds are not aborted by a stale flag. (A cancel() AFTER begin

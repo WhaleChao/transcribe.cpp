@@ -120,9 +120,13 @@ TRANSCRIBE_LIBRARY=../../build-shared/src/libtranscribe.dylib \
 
 ## Notes
 
-- One run/stream at a time per `Model` in 0.x: sessions share the model's
-  compute backend, so serialize runs across sessions (or load one model per
-  worker). See the `Model` docstring.
+- One compute call at a time per `Model` in 0.x: sessions share the model's
+  compute backend, so the binding serializes `run` / `run_batch` / stream
+  calls across all sessions of a model with a model-wide lock. Calls from
+  other threads wait their turn (they no longer race); load one model per
+  worker for parallel transcription. An active stream still occupies the
+  model between feeds, so finish it before running other sessions of that
+  model. See the `Model` docstring.
 - Import package: `transcribe_cpp`
 - Distribution: `transcribe-cpp`
 - License: MIT

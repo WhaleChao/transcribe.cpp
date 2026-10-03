@@ -16,14 +16,18 @@ be 16 kHz mono float32; resample external audio first, e.g.::
 
 Long-running native calls (model load, run) release the GIL — ctypes does this
 for every foreign call — so other Python threads make progress during inference.
+Compute calls on one Model are serialized by a model-wide lock (see ``Model``):
+concurrent calls from other threads wait their turn instead of racing.
 """
 
 from __future__ import annotations
 
+import collections
 import ctypes
 import os
 import threading
 import weakref
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Literal, Optional, Sequence, Union
 
@@ -391,7 +395,12 @@ def set_log_callback(handler) -> None:
     contract for transcribe_log_set). The handler may be invoked from ggml worker
     threads, so it must be thread-safe — route to the ``logging`` module or a
     queue rather than doing heavy work inline. Levels mirror
-    TRANSCRIBE_LOG_LEVEL_* (1=info, 2=warn, 3=error, 4=debug)."""
+    TRANSCRIBE_LOG_LEVEL_* (1=info, 2=warn, 3=error, 4=debug).
+
+    The handler can fire while a compute call holds its model's lock, so it
+    must not call compute APIs (run, run_batch, stream, feed, finalize,
+    reset) on that model: from the computing thread such a call raises
+    TranscribeError, and from a ggml worker thread it would deadlock."""
     global _log_handler, _log_trampoline
     _log_handler = handler
     if _log_trampoline is None:
@@ -907,13 +916,30 @@ class SortformerStreamOptions(FamilyExtension):
 
 
 class Model:
-    """A loaded model. Sharing it across threads for queries and session
-    creation is safe; it must outlive its sessions.
+    """A loaded model. Sharing it across threads is safe: queries
+    (``arch``, ``capabilities``, ``supports`` ...) and session creation run
+    concurrently. It must outlive its sessions (``close()`` enforces that).
 
-    Known 0.x limitation: at most one run/stream may be IN FLIGHT across all
-    sessions of a model at a time — sessions share the model's compute
-    backend, so overlapping runs race. Run sessions serially (a pool behind
-    a lock is fine), or load one Model per worker for true parallelism.
+    Compute calls are serialized per model. The native library allows at
+    most one compute call in flight across ALL sessions of a model (they
+    share its compute backend), so ``Session.run()``, ``run_batch()``,
+    ``stream()`` and ``Stream.feed()`` / ``finalize()`` / ``reset()`` each
+    hold a model-wide lock for the native call and for copying its results
+    out. Calls on any session of the same model from other threads WAIT for
+    the lock — they never raise a "busy" error — and a waiting call can
+    still be cancelled with its session's ``cancel()``. Load one Model per
+    worker for parallel transcription. (Up to 0.3 the binding did not lock:
+    overlapping calls on one model raced and could corrupt decodes.)
+
+    The lock covers individual calls, not a stream's lifetime: an active
+    stream still occupies the model between feeds (the C contract), so do
+    not run other sessions of this model until the stream is finalized or
+    reset.
+
+    ``close()`` (and garbage collection) never waits for the lock: closing
+    the model or a session while a call is in flight marks it closed at
+    once, lets the in-flight call finish and copy out its results, and
+    frees the native handles right after it.
 
     ``backend="auto"`` (the default) picks the best available device. The
     ``TRANSCRIBE_BACKEND`` environment variable overrides that *default* —
@@ -929,6 +955,7 @@ class Model:
         # derived session is gone (use-after-free otherwise). Created before
         # the load call so the failure path of __del__ finds it.
         self._sessions = weakref.WeakSet()
+        self._init_compute_state()
         backend_source = "backend"
         if backend == "auto" and os.environ.get("TRANSCRIBE_BACKEND"):
             backend = os.environ["TRANSCRIBE_BACKEND"]  # type: ignore[assignment]
@@ -955,6 +982,91 @@ class Model:
         if self._handle is None:
             raise TranscribeError("model is closed")
         return self._handle
+
+    # --- compute exclusion -------------------------------------------------
+    #
+    # One plain (non-reentrant) Lock per model serializes every native compute
+    # call and the copy-out of its results. Not an RLock: the only way a
+    # thread can re-enter is a callback (the log handler) firing inside a
+    # native call, and letting that start a second compute on the same model
+    # mid-flight is exactly the race the lock exists to prevent — so a
+    # re-entrant attempt is detected via _compute_owner and raises instead.
+    # The abort callback only reads a threading.Event and never touches the
+    # lock, so cancel() stays lock-free.
+    #
+    # Native frees never wait for the lock (they run from close() and from
+    # __del__, which GC may invoke on a thread that already holds it, e.g.
+    # mid copy-out). A free is queued on _deferred and executed by whichever
+    # thread holds the lock — immediately if it is free, else by the holder
+    # just before it releases. FIFO order keeps the C contract that sessions
+    # are freed before their model.
+
+    def _init_compute_state(self) -> None:
+        self._compute_lock = threading.Lock()
+        self._compute_owner: Optional[int] = None  # thread ident while held
+        self._deferred: collections.deque = collections.deque()
+
+    @contextmanager
+    def _exclusive(self, kind: str):
+        """Hold the model-wide compute lock for one compute call of *kind*
+        (blocking until it is free) and check the model is still open. Run
+        the native call AND the copy-out of its results inside the block,
+        and capture the session handle inside it too."""
+        me = threading.get_ident()
+        if self._compute_owner == me:
+            raise TranscribeError(
+                f"cannot start {kind}: this thread is already inside a "
+                "compute call on this model (a re-entrant call from a "
+                "callback?)")
+        self._compute_lock.acquire()
+        self._compute_owner = me
+        try:
+            if self._handle is None:
+                raise TranscribeError("model is closed")
+            yield
+        finally:
+            try:
+                self._drain_deferred_locked()
+            finally:
+                # Owner stays set while draining: a native free can log, and
+                # the re-entrancy check must still see this thread.
+                self._compute_owner = None
+                self._compute_lock.release()
+            self._try_drain()
+
+    def _drain_deferred_locked(self) -> None:
+        """Run queued native frees. Caller holds the compute lock."""
+        while True:
+            try:
+                free = self._deferred.popleft()
+            except IndexError:
+                return
+            try:
+                free()
+            except Exception:
+                pass  # a native free cannot meaningfully fail
+
+    def _try_drain(self) -> None:
+        """Run queued frees now if the lock is free; otherwise leave them to
+        the current holder, which drains before releasing. Never blocks.
+        Re-checks after releasing so a free queued in the gap between the
+        holder's drain and its release is never stranded."""
+        while self._deferred:
+            if not self._compute_lock.acquire(blocking=False):
+                return
+            self._compute_owner = threading.get_ident()
+            try:
+                self._drain_deferred_locked()
+            finally:
+                self._compute_owner = None
+                self._compute_lock.release()
+
+    def _free_or_defer(self, free) -> None:
+        """Run the native *free* behind any in-flight compute call without
+        waiting for it. *free* must not reference the Session/Model object
+        (it may run after that object is gone)."""
+        self._deferred.append(free)
+        self._try_drain()
 
     @property
     def arch(self) -> str:
@@ -1046,12 +1158,20 @@ class Model:
     def close(self) -> None:
         """Free the model. Any session still open on it is closed first —
         the C contract forbids freeing a model before its sessions, so this
-        keeps explicit close()/context-manager exit safe in any order."""
-        if getattr(self, "_handle", None) is not None:
-            for session in list(getattr(self, "_sessions", ()) or ()):
-                session.close()
-            _lib.transcribe_model_free(self._handle)
-            self._handle = None
+        keeps explicit close()/context-manager exit safe in any order.
+
+        Never waits for the compute lock: if a call is in flight on one of
+        the sessions, the model is marked closed now and the native frees
+        (sessions first, then the model) run as soon as that call ends."""
+        handle = getattr(self, "_handle", None)
+        if handle is None:
+            return
+        # Closed from here on: a call queued on the lock sees it once it gets
+        # the lock; an in-flight call already captured its handles.
+        self._handle = None
+        for session in list(getattr(self, "_sessions", ()) or ()):
+            session.close()
+        self._free_or_defer(lambda: _lib.transcribe_model_free(handle))
 
     def __enter__(self) -> "Model":
         return self
@@ -1067,11 +1187,16 @@ class Model:
 
 
 class Session:
-    """A single transcription context bound to one Model. Not thread-safe.
+    """A single transcription context bound to one Model.
 
-    Sessions of one model must also not RUN concurrently with each other in
-    0.x (they share the model's compute backend — see the Model docstring);
-    interleave or serialize their runs, or use one Model per worker."""
+    Compute calls (``run``, ``run_batch``, ``stream`` and the Stream's
+    ``feed`` / ``finalize`` / ``reset``) take the model-wide compute lock,
+    so calls on sessions of one model — from any threads — serialize: a
+    call made while another is in flight waits for it (see ``Model``).
+    Reads (``limits``, ``was_aborted``, ``Stream.text()`` / ``snapshot()``
+    / ``state`` ...) do not take the lock; don't read a session from one
+    thread while another thread is computing on that same session.
+    ``cancel()`` is safe from any thread."""
 
     def __init__(self, model: Model, *, n_threads: int = 0, kv_type: KVType = "auto",
                  n_ctx: int = 0):
@@ -1158,25 +1283,29 @@ class Session:
         On ``Aborted`` (via :meth:`cancel`) and ``OutputTruncated`` (including
         its ``OutputRepetition`` subclass) the partial transcript is preserved
         and attached to the exception as ``partial_result``."""
+        # Cleared BEFORE waiting for the compute lock, so a cancel() issued
+        # while this call is queued behind another still aborts it.
         self._cancel.clear()
         array, n_samples = _pcm_to_carray(pcm)
         params = _build_run_params(task, language, target_language, timestamps,
                                    keep_special_tags, spec_k_drafts, diarize, pnc, itn,
                                    vocabulary, prompt, prefix)
-        ext = self._resolve_family(family, "run") if family is not None else None
-        if ext is not None:
-            params.family = ctypes.cast(
-                _byref(ext), ctypes.POINTER(_generated.transcribe_ext))
-        try:
-            _check(_lib.transcribe_run(self._h, array, n_samples, _byref(params)),
-                   "transcribe_run")
-        except (Aborted, OutputTruncated) as exc:
-            # The C API preserves the partial transcript on the session for
-            # these statuses (OutputRepetition included, as an OutputTruncated
-            # subclass); surface it rather than discard it.
-            exc.partial_result = self._materialize()
-            raise
-        return self._materialize()
+        with self._model._exclusive("run"):
+            ext = self._resolve_family(family, "run") if family is not None else None
+            if ext is not None:
+                params.family = ctypes.cast(
+                    _byref(ext), ctypes.POINTER(_generated.transcribe_ext))
+            h = self._h  # captured under the lock; close() defers its free
+            try:
+                _check(_lib.transcribe_run(h, array, n_samples, _byref(params)),
+                       "transcribe_run")
+            except (Aborted, OutputTruncated) as exc:
+                # The C API preserves the partial transcript on the session for
+                # these statuses (OutputRepetition included, as an OutputTruncated
+                # subclass); surface it rather than discard it.
+                exc.partial_result = self._materialize(h)
+                raise
+            return self._materialize(h)
 
     def run_batch(self, pcms: Sequence[PCMLike], *, task: Task = "transcribe",
                   language: str | None = None,
@@ -1211,7 +1340,7 @@ class Session:
 
         ``vocabulary`` / ``prompt`` apply to every utterance (see :meth:`run`);
         a transcript prefix is per-utterance and so is not accepted here."""
-        self._cancel.clear()
+        self._cancel.clear()  # before the lock wait, as in run()
         pcms = list(pcms)
         if not pcms:
             raise InvalidArgument("run_batch requires at least one PCM buffer")
@@ -1228,44 +1357,47 @@ class Session:
         params = _build_run_params(task, language, target_language, timestamps,
                                    keep_special_tags, spec_k_drafts, diarize, pnc, itn,
                                    vocabulary, prompt)
-        ext = self._resolve_family(family, "run") if family is not None else None
-        if ext is not None:
-            params.family = ctypes.cast(
-                _byref(ext), ctypes.POINTER(_generated.transcribe_ext))
-        batch_abort = None
-        try:
-            _check(
-                _lib.transcribe_run_batch(self._h, ptrs, counts, len(pcms), _byref(params)),
-                "transcribe_run_batch",
-            )
-        except Aborted as exc:
-            # Cancellation surfaces at the BATCH level, but the native side
-            # pads the per-utterance result set so clips completed before the
-            # abort survive. Fall through to the per-utterance loop, which
-            # restores utterance context instead of discarding that work.
-            batch_abort = exc
+        # The native call AND the per-utterance copy-out run under the lock.
+        with self._model._exclusive("run_batch"):
+            ext = self._resolve_family(family, "run") if family is not None else None
+            if ext is not None:
+                params.family = ctypes.cast(
+                    _byref(ext), ctypes.POINTER(_generated.transcribe_ext))
+            h = self._h  # captured under the lock; close() defers its free
+            batch_abort = None
+            try:
+                _check(
+                    _lib.transcribe_run_batch(h, ptrs, counts, len(pcms), _byref(params)),
+                    "transcribe_run_batch",
+                )
+            except Aborted as exc:
+                # Cancellation surfaces at the BATCH level, but the native side
+                # pads the per-utterance result set so clips completed before the
+                # abort survive. Fall through to the per-utterance loop, which
+                # restores utterance context instead of discarding that work.
+                batch_abort = exc
 
-        out: list = []
-        first_exc = None
-        for i in range(_lib.transcribe_batch_n_results(self._h)):
-            status = _lib.transcribe_batch_status(self._h, i)
-            if status == 0:
-                out.append(self._materialize(i))
-                continue
-            exc = exception_for_status(status, _status_string(status),
-                                       f"utterance {i} in batch")
-            exc.utterance_index = i
-            if isinstance(exc, (Aborted, OutputTruncated)):
-                # Attach the partial transcript only when the native layer
-                # actually snapshotted one for this slot — some batch paths
-                # record failed slots as empty, and None is more honest than
-                # a confidently empty Result.
-                partial = self._materialize(i)
-                if partial.text or partial.tokens or partial.segments:
-                    exc.partial_result = partial
-            out.append(exc)
-            if first_exc is None:
-                first_exc = exc
+            out: list = []
+            first_exc = None
+            for i in range(_lib.transcribe_batch_n_results(h)):
+                status = _lib.transcribe_batch_status(h, i)
+                if status == 0:
+                    out.append(self._materialize(h, i))
+                    continue
+                exc = exception_for_status(status, _status_string(status),
+                                           f"utterance {i} in batch")
+                exc.utterance_index = i
+                if isinstance(exc, (Aborted, OutputTruncated)):
+                    # Attach the partial transcript only when the native layer
+                    # actually snapshotted one for this slot — some batch paths
+                    # record failed slots as empty, and None is more honest than
+                    # a confidently empty Result.
+                    partial = self._materialize(h, i)
+                    if partial.text or partial.tokens or partial.segments:
+                        exc.partial_result = partial
+                out.append(exc)
+                if first_exc is None:
+                    first_exc = exc
         if first_exc is None and batch_abort is not None:
             # Anomalous: an abort with no per-utterance trace. Re-raise loud
             # (even under return_exceptions) rather than swallow a cancel.
@@ -1294,7 +1426,7 @@ class Session:
         the Stream as a context manager so it is reset when you are done.
         ``vocabulary`` and ``prompt`` are as in :meth:`run`; ``task="instruct"``
         raises."""
-        self._cancel.clear()
+        self._cancel.clear()  # before the lock wait, as in run()
         # spec_k_drafts is an offline-decode knob; streaming always uses the
         # family default (-1).
         run_params = _build_run_params(task, language, target_language, timestamps,
@@ -1304,14 +1436,15 @@ class Session:
         _lib.transcribe_stream_params_init(_byref(sp))
         sp.commit_policy = _enum(_COMMIT_POLICIES, commit_policy, "commit_policy")
         sp.stable_prefix_agreement_n = stable_prefix_agreement_n
-        ext = self._resolve_family(family, "stream") if family is not None else None
-        if ext is not None:
-            sp.family = ctypes.cast(
-                _byref(ext), ctypes.POINTER(_generated.transcribe_ext))
-        _check(
-            _lib.transcribe_stream_begin(self._h, _byref(run_params), _byref(sp)),
-            "transcribe_stream_begin",
-        )
+        with self._model._exclusive("stream_begin"):
+            ext = self._resolve_family(family, "stream") if family is not None else None
+            if ext is not None:
+                sp.family = ctypes.cast(
+                    _byref(ext), ctypes.POINTER(_generated.transcribe_ext))
+            _check(
+                _lib.transcribe_stream_begin(self._h, _byref(run_params), _byref(sp)),
+                "transcribe_stream_begin",
+            )
         # The C contract says everything passed to begin may be freed once it
         # returns (strings are copied into session-owned storage). The Stream
         # still pins the params structs until reset() as defense in depth —
@@ -1319,11 +1452,16 @@ class Session:
         # or out-of-tree native library that predates that contract.
         return Stream(self, _keepalive=(run_params, sp, ext))
 
-    def _materialize(self, utt: int | None = None) -> Result:
-        """Copy out one result. utt is None for the single-result accessors, or
-        an utterance index for the batch accessors (index 0 aliases the single
-        result after a plain run, so both paths share this code)."""
-        h = self._h
+    def _materialize(self, h: ctypes.c_void_p | None = None,
+                     utt: int | None = None) -> Result:
+        """Copy out one result. A compute call's copy-out passes the session
+        handle *h* it captured under the compute lock (so a concurrent close()
+        cannot pull it away mid-copy); None reads this session's live handle.
+        utt is None for the single-result accessors, or an utterance index for
+        the batch accessors (index 0 aliases the single result after a plain
+        run, so both paths share this code)."""
+        if h is None:
+            h = self._h
         if utt is None:
             n_seg = lambda: _lib.transcribe_n_segments(h)
             get_seg = lambda j, out: _lib.transcribe_get_segment(h, j, out)
@@ -1416,8 +1554,11 @@ class Session:
         """Request cancellation of an in-flight run/stream from another thread.
         The active call aborts at the next chunk/decode boundary and raises
         ``Aborted`` (with ``partial_result`` attached); ``was_aborted`` then
-        reports True. The flag is cleared at the start of the next
-        run/stream."""
+        reports True. The flag is cleared when the next run/run_batch/stream
+        call starts — before it waits for the model's compute lock, so a
+        cancel() issued while that call is queued behind another session's
+        call aborts it as soon as it begins. Lock-free; safe from any
+        thread."""
         self._cancel.set()
 
     @property
@@ -1426,9 +1567,22 @@ class Session:
         return bool(_lib.transcribe_was_aborted(self._h))
 
     def close(self) -> None:
-        if getattr(self, "_handle", None) is not None:
-            _lib.transcribe_session_free(self._handle)
-            self._handle = None
+        """Free the session. Idempotent. Never waits for the compute lock: if
+        a call is in flight on this model, the session is marked closed now
+        and the native free runs as soon as that call ends."""
+        handle = getattr(self, "_handle", None)
+        if handle is None:
+            return
+        self._handle = None
+        # The abort trampoline must outlive the native session that points at
+        # it, so the deferred free pins it. Nothing here references self: the
+        # free may run after this object is gone (close() from __del__).
+        trampoline = getattr(self, "_abort_trampoline", None)
+
+        def free(handle=handle, _pin=trampoline):
+            _lib.transcribe_session_free(handle)
+
+        self._model._free_or_defer(free)
 
     def __enter__(self) -> "Session":
         return self
@@ -1469,17 +1623,19 @@ class Stream:
         array, n_samples = _pcm_to_carray(pcm)
         update = _StreamUpdate()
         _lib.transcribe_stream_update_init(_byref(update))
-        _check(_lib.transcribe_stream_feed(self._h, array, n_samples, _byref(update)),
-               "transcribe_stream_feed")
-        return _stream_update_from(update)
+        with self._session._model._exclusive("stream_feed"):
+            _check(_lib.transcribe_stream_feed(self._h, array, n_samples, _byref(update)),
+                   "transcribe_stream_feed")
+            return _stream_update_from(update)
 
     def finalize(self) -> StreamUpdate:
         """Signal end of audio and flush the final hypothesis."""
         update = _StreamUpdate()
         _lib.transcribe_stream_update_init(_byref(update))
-        _check(_lib.transcribe_stream_finalize(self._h, _byref(update)),
-               "transcribe_stream_finalize")
-        return _stream_update_from(update)
+        with self._session._model._exclusive("stream_finalize"):
+            _check(_lib.transcribe_stream_finalize(self._h, _byref(update)),
+                   "transcribe_stream_finalize")
+            return _stream_update_from(update)
 
     def text(self) -> StreamText:
         """Current committed / tentative / full text views (owned copies)."""
@@ -1522,7 +1678,8 @@ class Stream:
     def reset(self) -> None:
         """Return the session to idle, discarding stream state. Idempotent."""
         if self._active:
-            _lib.transcribe_stream_reset(self._session._h)
+            with self._session._model._exclusive("stream_reset"):
+                _lib.transcribe_stream_reset(self._session._h)
             self._active = False
             self._keepalive = None
 
