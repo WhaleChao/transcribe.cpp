@@ -6,6 +6,7 @@
 
 add_executable(transcribe-cli
     main.cpp
+    asr.cpp
 )
 
 target_link_libraries(transcribe-cli
