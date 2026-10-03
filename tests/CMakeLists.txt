@@ -336,6 +336,23 @@ add_test(NAME transcribe_role_resolve_unit
     COMMAND transcribe_role_resolve_unit)
 
 # -----------------------------------------------------------------------------
+# Host thread pool: join on every path, exceptions reach the caller
+# -----------------------------------------------------------------------------
+
+add_executable(transcribe_run_on_threads_unit
+    run_on_threads_unit.cpp)
+
+target_link_libraries(transcribe_run_on_threads_unit PRIVATE transcribe)
+
+target_include_directories(transcribe_run_on_threads_unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
+
+transcribe_apply_warnings(transcribe_run_on_threads_unit)
+
+add_test(NAME transcribe_run_on_threads_unit
+    COMMAND transcribe_run_on_threads_unit)
+
+# -----------------------------------------------------------------------------
 # Dispatcher-level streaming entry-point behavior
 # -----------------------------------------------------------------------------
 
