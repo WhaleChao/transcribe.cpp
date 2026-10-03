@@ -70,8 +70,6 @@ DiarStreamScratch::~DiarStreamScratch() {
     }
 }
 
-SortformerSession::~SortformerSession() = default;
-
 namespace {
 
 // Map the Sortformer hparams onto the parakeet encoder hparams that
@@ -540,16 +538,6 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
     m->variant = loader.variant().empty() ? k_default_variant : loader.variant();
     m->backend.clear();
 
-    apply_family_invariants(*m);
-    m->caps.n_languages = 0;
-    m->caps.languages   = nullptr;
-
-    if (const transcribe_status st = read_capability_kv(loader.gguf(), m->caps); st != TRANSCRIBE_OK) {
-        return st;
-    }
-    if (const transcribe_status st = read_languages_kv(loader.gguf(), *m); st != TRANSCRIBE_OK) {
-        return st;
-    }
     if (const transcribe_status st = read_sortformer_hparams(loader.gguf(), m->hparams); st != TRANSCRIBE_OK) {
         return st;
     }
@@ -624,7 +612,7 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
         return st;
     }
 
-    m->roles     = k_role_asr | k_role_diarize;
+    m->roles     = k_role_diarize;
     m->t_load_us = ggml_time_us() - t_load_start;
     *out_model   = m.release();
     return TRANSCRIBE_OK;
@@ -657,23 +645,9 @@ transcribe_status fuse_embedded_diar_bn(SortformerEmbedded &    e,
     return fuse_conformer_bn_core(e.conformer.blocks, e.conformer_hp.enc_d_model, backend, out_ctx, out_buffer);
 }
 
-transcribe_status init_context(transcribe_model *                model,
-                               const transcribe_session_params * params,
-                               transcribe_session **             out_ctx) {
-    if (model->arch != &arch) {
-        return TRANSCRIBE_ERR_INVALID_ARG;
-    }
-    auto pc       = std::make_unique<SortformerSession>();
-    pc->model     = model;
-    pc->n_threads = params->n_threads;
-    pc->kv_type   = params->kv_type;
-    *out_ctx      = pc.release();
-    return TRANSCRIBE_OK;
-}
-
 // Lazily create the persistent multi-backend scheduler shared by the offline
 // and streaming graphs.
-template <typename Session> static transcribe_status ensure_sched(Session * pc, SortformerModel * pm) {
+static transcribe_status ensure_sched(SortformerSession * pc, SortformerModel * pm) {
     if (pc->sched == nullptr) {
         pc->sched = ggml_backend_sched_new(pm->plan.scheduler_list.data(), nullptr,
                                            static_cast<int>(pm->plan.scheduler_list.size()),
@@ -689,8 +663,7 @@ template <typename Session> static transcribe_status ensure_sched(Session * pc, 
 // head over the entire mel and dumps the Stage-4 parity tensors (enc.* +
 // diar.preds_offline). Invoked only when tensor dumping is active (the
 // streaming path is the product); keeps the offline tensor gate green.
-template <typename Session>
-static transcribe_status run_offline_forward(Session * pc, SortformerModel * pm, int mel_n_frames) {
+static transcribe_status run_offline_forward(SortformerSession * pc, SortformerModel * pm, int mel_n_frames) {
     if (pc->compute_ctx != nullptr) {
         ggml_free(pc->compute_ctx);
         pc->compute_ctx = nullptr;
@@ -947,8 +920,7 @@ transcribe_status run_diar_streaming_core(DiarStreamScratch &            sc,
 
 // Family wrapper: resolve the operating point, run the core, trim, dump,
 // and hand back the frame probabilities.
-template <typename Session>
-static transcribe_status run_streaming(Session *                    pc,
+static transcribe_status run_streaming(SortformerSession *          pc,
                                        SortformerModel *            pm,
                                        int                          mel_n_mels,
                                        int                          mel_n_frames,
@@ -989,10 +961,8 @@ static transcribe_status run_streaming(Session *                    pc,
     return TRANSCRIBE_OK;
 }
 
-// Mel -> (optional offline parity dump) -> streaming forward, shared by the
-// ASR run and the DIARIZE run.
-template <typename Session>
-static transcribe_status diarize_pcm(Session *                    pc,
+// Mel -> (optional offline parity dump) -> streaming forward.
+static transcribe_status diarize_pcm(SortformerSession *          pc,
                                      SortformerModel *            pm,
                                      const float *                pcm,
                                      int                          n_samples,
@@ -1028,50 +998,10 @@ static transcribe_status diarize_pcm(Session *                    pc,
     return run_streaming(pc, pm, mel_n_mels, mel_n_frames, ms_per_frame, preset, out);
 }
 
-transcribe_status run(transcribe_session *          session,
-                      const float *                 pcm,
-                      int                           n_samples,
-                      const transcribe_run_params * params) {
-    auto * pc = static_cast<SortformerSession *>(session);
-    auto * pm = static_cast<SortformerModel *>(session->model);
-
-    if (pc->poll_abort()) {
-        return TRANSCRIBE_ERR_ABORTED;
-    }
-
-    // Streaming operating-point run ext (kind/size/range already validated
-    // by the dispatcher + run_validate pre-clear; re-check is belt-and-braces).
-    transcribe_sortformer_preset preset = TRANSCRIBE_SORTFORMER_PRESET_DEFAULT;
-    if (params != nullptr && params->family != nullptr) {
-        if (const transcribe_status st = transcribe_ext_check(params->family, TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM,
-                                                              sizeof(struct transcribe_sortformer_stream_ext));
-            st != TRANSCRIBE_OK) {
-            return st;
-        }
-        preset = reinterpret_cast<const transcribe_sortformer_stream_ext *>(params->family)->preset;
-    }
-    pc->clear_result();
-
-    DiarizeProbs probs;
-    if (const transcribe_status st = diarize_pcm(pc, pm, pcm, n_samples, preset, probs); st != TRANSCRIBE_OK) {
-        return st;
-    }
-    probs_to_segments(probs.probs.data(), probs.n_frames, probs.n_speakers, probs.frame_ms, pc->speaker_segments);
-
-    pc->result_kind = TRANSCRIBE_TIMESTAMPS_NONE;
-    pc->has_result  = true;
-    return TRANSCRIBE_OK;
-}
-
-// Kind+slot probe. Sortformer ships one RUN-slot extension (the streaming
-// operating-point preset); there is no STREAM-slot surface (no push-audio
-// entry point yet — a future one registers a separate kind).
+// Kind+slot probe: the operating-point preset on the DIARIZE_RUN slot.
 static bool accepts_ext_kind(const transcribe_model * model, transcribe_ext_slot slot, uint32_t kind) {
-    if (model == nullptr) {
-        return false;
-    }
-    return (slot == TRANSCRIBE_EXT_SLOT_RUN && kind == TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM) ||
-           (slot == TRANSCRIBE_EXT_SLOT_DIARIZE_RUN && kind == TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE);
+    return model != nullptr && slot == TRANSCRIBE_EXT_SLOT_DIARIZE_RUN &&
+           kind == TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE;
 }
 
 static transcribe_status check_preset(transcribe_sortformer_preset preset) {
@@ -1085,21 +1015,6 @@ static transcribe_status check_preset(transcribe_sortformer_preset preset) {
     return TRANSCRIBE_ERR_INVALID_ARG;
 }
 
-// Pre-clear validation for the _RUN slot (see Arch::run_validate): reject a
-// malformed ext or an out-of-range preset before the previous result
-// snapshot is destroyed.
-static transcribe_status run_validate(const transcribe_session * /*ctx*/, const transcribe_run_params * params) {
-    if (params == nullptr || params->family == nullptr) {
-        return TRANSCRIBE_OK;  // NULL ext -> family defaults
-    }
-    if (const transcribe_status st = transcribe_ext_check(params->family, TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM,
-                                                          sizeof(struct transcribe_sortformer_stream_ext));
-        st != TRANSCRIBE_OK) {
-        return st;
-    }
-    return check_preset(reinterpret_cast<const transcribe_sortformer_stream_ext *>(params->family)->preset);
-}
-
 // ---- DIARIZE role ----
 
 static int diarize_max_speakers(const transcribe_model * model) {
@@ -1109,7 +1024,7 @@ static int diarize_max_speakers(const transcribe_model * model) {
 static transcribe_status diarize_init_session(transcribe_model *,
                                               const transcribe_diarize_session_params *,
                                               transcribe_diarize_session ** out) {
-    *out = new SortformerDiarizeSession();
+    *out = new SortformerSession();
     return TRANSCRIBE_OK;
 }
 
@@ -1127,7 +1042,7 @@ static transcribe_status diarize_run(transcribe_diarize_session *      session,
                                      int                               n_samples,
                                      const transcribe_diarize_params * params,
                                      DiarizeProbs &                    out) {
-    auto * pc = static_cast<SortformerDiarizeSession *>(session);
+    auto * pc = static_cast<SortformerSession *>(session);
     if (pc->poll_abort()) {
         return TRANSCRIBE_ERR_ABORTED;
     }
@@ -1148,8 +1063,8 @@ static const DiarizeOps k_diarize_ops = {
 extern const Arch arch = {
     /* .name             = */ "sortformer",
     /* .load             = */ load,
-    /* .init_context     = */ init_context,
-    /* .run              = */ run,
+    /* .init_context     = */ nullptr,
+    /* .run              = */ nullptr,
     /* .run_batch        = */ nullptr,
     /* .stream_validate  = */ nullptr,
     /* .stream_begin     = */ nullptr,
@@ -1157,7 +1072,7 @@ extern const Arch arch = {
     /* .stream_finalize  = */ nullptr,
     /* .stream_reset     = */ nullptr,
     /* .accepts_ext_kind = */ accepts_ext_kind,
-    /* .run_validate     = */ run_validate,
+    /* .run_validate     = */ nullptr,
     /* .diarize          = */ &k_diarize_ops,
 };
 
@@ -1176,15 +1091,5 @@ extern "C" void transcribe_sortformer_diarize_ext_init(struct transcribe_sortfor
     std::memset(p, 0, sizeof(*p));
     p->ext.size = sizeof(*p);
     p->ext.kind = TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE;
-    p->preset   = TRANSCRIBE_SORTFORMER_PRESET_DEFAULT;
-}
-
-extern "C" void transcribe_sortformer_stream_ext_init(struct transcribe_sortformer_stream_ext * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->ext.size = sizeof(*p);
-    p->ext.kind = TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM;
     p->preset   = TRANSCRIBE_SORTFORMER_PRESET_DEFAULT;
 }

@@ -501,8 +501,6 @@ def cmd_cpp(args: argparse.Namespace) -> int:
             cmd += ["--language", language]
         if args.family == "whisper":
             cmd += ["--timestamps", "none"]
-        if args.family == "sortformer":
-            cmd += ["--role", "diarize"]
         if args.family in ("sensevoice", "parakeet"):
             # The reference dumper emits the raw token stream including
             # control / language tags (sensevoice: language / event /

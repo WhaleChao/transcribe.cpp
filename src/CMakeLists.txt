@@ -65,7 +65,6 @@ add_library(transcribe
     arch/moss/decoder.cpp
     arch/sortformer/model.cpp
     arch/sortformer/stream.cpp
-    arch/sortformer/capabilities.cpp
     arch/sortformer/weights.cpp
     arch/voxtral/model.cpp
     arch/voxtral/capabilities.cpp

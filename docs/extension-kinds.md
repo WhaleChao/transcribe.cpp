@@ -49,7 +49,7 @@ parameter; existing kinds keep their slot for life.
 | `0x5453534D`   | `MSST` | `STREAM` | `TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM` | moonshine_streaming | `include/transcribe/moonshine_streaming.h` |
 | `0x4E524857`   | `WHRN` | `RUN`    | `TRANSCRIBE_EXT_KIND_WHISPER_RUN`               | whisper      | `include/transcribe/whisper.h`  |
 | `0x54535256`   | `VRST` | `STREAM` | `TRANSCRIBE_EXT_KIND_VOXTRAL_REALTIME_STREAM`   | voxtral_realtime | `include/transcribe/voxtral_realtime.h` |
-| `0x54534653`   | `SFST` | `RUN`    | `TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM`         | sortformer   | `include/transcribe/sortformer.h` |
+| `0x54534653`   | `SFST` | `RUN`    | retired in 0.4 (was `TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM`); never reuse | sortformer | - |
 | `0x52444653`   | `SFDR` | `DIARIZE_RUN` | `TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE`   | sortformer   | `include/transcribe/sortformer.h` |
 
 Empty rows reserved for future allocations:

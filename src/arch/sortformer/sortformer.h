@@ -17,8 +17,7 @@
 #include "transcribe-diarize.h"
 #include "transcribe-mel.h"
 #include "transcribe-model.h"
-#include "transcribe-session.h"
-#include "transcribe/sortformer.h"  // public preset enum + run ext
+#include "transcribe/sortformer.h"  // public preset enum + diarize ext
 #include "weights.h"
 
 #include <cstdint>
@@ -37,11 +36,6 @@ typedef struct ggml_backend_buffer * ggml_backend_buffer_t;
 typedef struct ggml_backend_sched *  ggml_backend_sched_t;
 
 namespace transcribe::sortformer {
-
-// Family defaults, applied before transcribe::read_capability_kv (KV
-// present overrides, KV absent keeps the default). Defined in
-// capabilities.cpp.
-void apply_family_invariants(transcribe_model & model);
 
 // Concrete model. Owns ctx_meta (every weight tensor's data buffer);
 // the destructor frees it, invalidating every borrowed ggml_tensor* in
@@ -187,10 +181,10 @@ struct DiarStreamScratch {
     ~DiarStreamScratch();
 };
 
-// Per-session scratch reused across runs, shared by the ASR and DIARIZE
-// session types. The per-call compute context and multi-backend scheduler
-// are owned by the SessionCore base (sched / compute_ctx).
-struct SortformerWork {
+// Concrete DIARIZE session. The per-call compute context and multi-backend
+// scheduler are owned by the SessionCore base (sched / compute_ctx).
+struct SortformerSession final : public transcribe_diarize_session {
+    // Per-session scratch reused across runs.
     std::vector<float> mel_buf;
     std::vector<float> probs_host;  // [n_spk * T], read back from diar.preds
 
@@ -198,15 +192,6 @@ struct SortformerWork {
     // offline forward's pos_emb fill).
     DiarStreamScratch scratch;
 };
-
-struct SortformerSession final : public transcribe_session,
-                                 SortformerWork {
-    SortformerSession() = default;
-    ~SortformerSession() override;
-};
-
-struct SortformerDiarizeSession final : public transcribe_diarize_session,
-                                        SortformerWork {};
 
 // ---- Embedded-diarizer surface (multitalker bundle) -------------------- //
 //

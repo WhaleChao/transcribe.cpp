@@ -1,9 +1,10 @@
 // sortformer_diarize_unit.cpp - Sortformer on the DIARIZE role, against a
 // real GGUF (TRANSCRIBE_SORTFORMER_GGUF; RC 77 skip when unset).
 //
-//   1. roles, info, and the SFDR kind on the DIARIZE_RUN slot.
-//   2. transcribe_diarize_run gives byte-identical segments to the ASR-path
-//      transcribe_run at the same preset (DEFAULT and LOW_LATENCY).
+//   1. roles (DIARIZE only), info, and the SFDR kind on the DIARIZE_RUN slot.
+//   2. Golden segments on the 2-speaker oracle mix per preset (CPU), and the
+//      ext preset matching the TRANSCRIBE_SORTFORMER_STREAM_PRESET env path
+//      the DER tooling uses.
 //   3. An out-of-range preset is rejected before the previous result is
 //      cleared.
 //   4. Cross-role concurrency: when TRANSCRIBE_WHISPER_GGUF is also set, an
@@ -39,17 +40,6 @@ struct Row {
 
     bool operator==(const Row & o) const { return t0 == o.t0 && t1 == o.t1 && spk == o.spk; }
 };
-
-std::vector<Row> asr_rows(const transcribe_session * s) {
-    std::vector<Row> rows;
-    for (int i = 0; i < transcribe_n_speaker_segments(s); ++i) {
-        transcribe_speaker_segment r;
-        transcribe_speaker_segment_init(&r);
-        transcribe_get_speaker_segment(s, i, &r);
-        rows.push_back({ r.t0_ms, r.t1_ms, r.speaker_id });
-    }
-    return rows;
-}
 
 std::vector<Row> diarize_rows(const transcribe_diarize_session * s) {
     std::vector<Row> rows;
@@ -140,38 +130,46 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    // 1. Roles, info, extension probe.
-    CHECK(transcribe_model_roles(model) == (TRANSCRIBE_ROLE_ASR | TRANSCRIBE_ROLE_DIARIZE));
+    // 1. Roles, info, extension probe. ASR entry points refuse the model.
+    CHECK(transcribe_model_roles(model) == TRANSCRIBE_ROLE_DIARIZE);
+    transcribe_session * asr = nullptr;
+    CHECK(transcribe_session_init(model, nullptr, &asr) == TRANSCRIBE_ERR_UNSUPPORTED_ROLE);
+    transcribe_capabilities caps;
+    transcribe_capabilities_init(&caps);
+    CHECK(transcribe_model_get_capabilities(model, &caps) == TRANSCRIBE_ERR_UNSUPPORTED_ROLE);
+    CHECK(!transcribe_model_supports(model, TRANSCRIBE_FEATURE_DIARIZATION));
     transcribe_diarize_info info;
     transcribe_diarize_info_init(&info);
     CHECK(transcribe_diarize_get_info(model, &info) == TRANSCRIBE_OK);
     CHECK(info.sample_rate == 16000 && info.max_speakers == 4);
     CHECK(transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_DIARIZE_RUN,
                                             TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE));
-    CHECK(!transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_DIARIZE_RUN,
-                                             TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM));
     CHECK(!transcribe_model_accepts_ext_kind(model, TRANSCRIBE_EXT_SLOT_RUN, TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE));
 
-    transcribe_session *         asr = nullptr;
     transcribe_diarize_session * dia = nullptr;
-    CHECK(transcribe_session_init(model, nullptr, &asr) == TRANSCRIBE_OK);
     CHECK(transcribe_diarize_session_init(model, nullptr, &dia) == TRANSCRIBE_OK);
 
-    // 2. Old (ASR path) vs new (DIARIZE role) parity.
-    for (transcribe_sortformer_preset preset :
-         { TRANSCRIBE_SORTFORMER_PRESET_DEFAULT, TRANSCRIBE_SORTFORMER_PRESET_LOW_LATENCY }) {
-        transcribe_sortformer_stream_ext ext;
-        transcribe_sortformer_stream_ext_init(&ext);
-        ext.preset = preset;
-        transcribe_run_params rp;
-        transcribe_run_params_init(&rp);
-        rp.family = &ext.ext;
-        CHECK(transcribe_run(asr, pcm.data(), static_cast<int>(pcm.size()), &rp) == TRANSCRIBE_OK);
-        const std::vector<Row> old_rows = asr_rows(asr);
-        const std::vector<Row> new_rows = diarize(dia, pcm, preset);
-        CHECK(!new_rows.empty());
-        CHECK(new_rows == old_rows);
-    }
+    // 2. Golden segments (ms, speaker) recorded on CPU, and ext == env preset.
+    const std::vector<Row> golden_default = {
+        { 320,   2400,  1 },
+        { 7360,  9360,  1 },
+        { 10240, 10640, 1 },
+        { 4240,  6640,  2 },
+        { 9760,  12000, 2 },
+    };
+    const std::vector<Row> golden_low_latency = {
+        { 320,   2480,  1 },
+        { 7360,  9360,  1 },
+        { 10240, 10640, 1 },
+        { 4160,  6640,  2 },
+        { 9760,  12000, 2 },
+    };
+    CHECK(diarize(dia, pcm, TRANSCRIBE_SORTFORMER_PRESET_DEFAULT) == golden_default);
+    CHECK(diarize(dia, pcm, TRANSCRIBE_SORTFORMER_PRESET_LOW_LATENCY) == golden_low_latency);
+    ::setenv("TRANSCRIBE_SORTFORMER_STREAM_PRESET", "low_latency", 1);
+    CHECK(transcribe_diarize_run(dia, pcm.data(), static_cast<int>(pcm.size()), nullptr) == TRANSCRIBE_OK);
+    CHECK(diarize_rows(dia) == golden_low_latency);
+    ::unsetenv("TRANSCRIBE_SORTFORMER_STREAM_PRESET");
 
     // 3. Pre-clear rejection of a bad preset keeps the previous result.
     const int                         n_before = transcribe_diarize_n_segments(dia);
@@ -184,7 +182,6 @@ int main() {
     CHECK(transcribe_diarize_run(dia, pcm.data(), static_cast<int>(pcm.size()), &dp) == TRANSCRIBE_ERR_INVALID_ARG);
     CHECK(transcribe_diarize_n_segments(dia) == n_before);
 
-    transcribe_session_free(asr);
     transcribe_diarize_session_free(dia);
 
     // 4. Cross-role concurrency on two models.
