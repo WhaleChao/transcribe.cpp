@@ -370,6 +370,23 @@ add_test(NAME transcribe_nonfinite_input_unit
     COMMAND transcribe_nonfinite_input_unit)
 
 # -----------------------------------------------------------------------------
+# A throwing stream hook ends the stream (FAILED, or IDLE for reset)
+# -----------------------------------------------------------------------------
+
+add_executable(transcribe_stream_hook_throw_unit
+    stream_hook_throw_unit.cpp)
+
+target_link_libraries(transcribe_stream_hook_throw_unit PRIVATE transcribe)
+
+target_include_directories(transcribe_stream_hook_throw_unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
+
+transcribe_apply_warnings(transcribe_stream_hook_throw_unit)
+
+add_test(NAME transcribe_stream_hook_throw_unit
+    COMMAND transcribe_stream_hook_throw_unit)
+
+# -----------------------------------------------------------------------------
 # Dispatcher-level streaming entry-point behavior
 # -----------------------------------------------------------------------------
 

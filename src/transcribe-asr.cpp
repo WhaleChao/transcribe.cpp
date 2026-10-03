@@ -965,6 +965,25 @@ extern "C" bool transcribe_was_truncated(const struct transcribe_session * sessi
 // last_status, and the public committed/tentative text view. clear_result()
 // wipes the snapshot but never touches stream_state.
 
+// A family stream hook that throws must still end the stream: mark it FAILED
+// with the status the api_guard will report for the exception (OOM for
+// bad_alloc, BACKEND otherwise), then let the exception reach the guard.
+// Without this a throwing hook left the stream ACTIVE while the caller got
+// an error.
+template <typename Fn> static transcribe_status call_stream_hook(transcribe_session * session, Fn && hook) {
+    try {
+        return hook();
+    } catch (const std::bad_alloc &) {
+        session->stream_state       = TRANSCRIBE_STREAM_FAILED;
+        session->stream_last_status = TRANSCRIBE_ERR_OOM;
+        throw;
+    } catch (...) {
+        session->stream_state       = TRANSCRIBE_STREAM_FAILED;
+        session->stream_last_status = TRANSCRIBE_ERR_BACKEND;
+        throw;
+    }
+}
+
 static transcribe_status transcribe_stream_begin_impl(struct transcribe_session *             session,
                                                       const struct transcribe_run_params *    run_params,
                                                       const struct transcribe_stream_params * stream_params) {
@@ -1130,7 +1149,8 @@ static transcribe_status transcribe_stream_begin_impl(struct transcribe_session 
     run_params_owned.prompt       = run_params->prompt != nullptr ? session->stream_prompt_owned.c_str() : nullptr;
     run_params_owned.prefix       = nullptr;
 
-    const transcribe_status st = session->model->arch->stream_begin(session, &run_params_owned, stream_params);
+    const transcribe_status st = call_stream_hook(
+        session, [&] { return session->model->arch->stream_begin(session, &run_params_owned, stream_params); });
     if (st != TRANSCRIBE_OK) {
         // Family hook rejected the begin (config it does not understand,
         // memory allocation failure, etc.). Roll lifecycle back to
@@ -1194,7 +1214,8 @@ static transcribe_status transcribe_stream_feed_impl(struct transcribe_session *
     const std::string prev_full_text  = session->full_text;
     const bool        prev_has_result = session->has_result;
 
-    const transcribe_status st = session->model->arch->stream_feed(session, pcm, n_samples, update);
+    const transcribe_status st =
+        call_stream_hook(session, [&] { return session->model->arch->stream_feed(session, pcm, n_samples, update); });
     if (st != TRANSCRIBE_OK) {
         session->stream_state       = TRANSCRIBE_STREAM_FAILED;
         session->stream_last_status = st;
@@ -1233,7 +1254,8 @@ static transcribe_status transcribe_stream_finalize_impl(struct transcribe_sessi
     const std::string prev_full_text  = session->full_text;
     const bool        prev_has_result = session->has_result;
 
-    const transcribe_status st = session->model->arch->stream_finalize(session, update);
+    const transcribe_status st =
+        call_stream_hook(session, [&] { return session->model->arch->stream_finalize(session, update); });
     if (update != nullptr) {
         // Force is_final true regardless of family hook return; the
         // marker describes the call site, not the result. Set after
@@ -1259,14 +1281,24 @@ static void transcribe_stream_reset_impl(struct transcribe_session * session) {
     // audio contents while keeping the allocations. A family without
     // streaming just has no hook installed; reset becomes a pure
     // dispatcher state wipe.
+    // The wipe below runs even if the hook throws, so reset always ends
+    // IDLE; the exception still reaches the api_guard afterwards.
+    std::exception_ptr hook_error;
     if (session->model != nullptr && session->model->arch != nullptr && session->model->arch->stream_reset != nullptr) {
-        session->model->arch->stream_reset(session);
+        try {
+            session->model->arch->stream_reset(session);
+        } catch (...) {
+            hook_error = std::current_exception();
+        }
     }
     session->clear_result();
     session->stream_state = TRANSCRIBE_STREAM_IDLE;
     // was_aborted is per-stream; reset re-arms it the same way begin
     // does so a caller that resets after an abort starts clean.
     session->was_aborted  = false;
+    if (hook_error) {
+        std::rethrow_exception(hook_error);
+    }
 }
 
 extern "C" enum transcribe_stream_state transcribe_stream_get_state(const struct transcribe_session * session) {
