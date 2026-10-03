@@ -635,13 +635,6 @@ const FAMILY: Record<string, FamilyReg> = {
       min_decode_interval_ms: o.minDecodeIntervalMs,
     }),
   },
-  sortformer: {
-    slot: "run",
-    kind: g.TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM,
-    type: "transcribe_sortformer_stream_ext",
-    init: "sortformerStreamExtInit",
-    map: (o) => sortformerPreset(o),
-  },
   sortformer_diarize: {
     slot: "diarize_run",
     kind: g.TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE,

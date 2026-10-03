@@ -276,11 +276,6 @@ export type SortformerPreset =
   | "very_high_latency"
   | "high_latency"
   | "low_latency";
-/** Sortformer diarizer options (run slot). A run produces speaker
- *  segments, no text. */
-export interface SortformerStreamOptions {
-  preset?: SortformerPreset;
-}
 /** Sortformer options for {@link DiarizeOptions.family} (diarize_run slot). */
 export interface SortformerDiarizeOptions {
   preset?: SortformerPreset;
@@ -292,7 +287,6 @@ export type FamilyExtension =
   | ({ kind: "parakeet" } & ParakeetStreamOptions)
   | ({ kind: "parakeet_buffered" } & ParakeetBufferedStreamOptions)
   | ({ kind: "voxtral" } & VoxtralRealtimeStreamOptions)
-  | ({ kind: "sortformer" } & SortformerStreamOptions)
   | ({ kind: "sortformer_diarize" } & SortformerDiarizeOptions);
 
 // ---- roles -----------------------------------------------------------------

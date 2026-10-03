@@ -43,35 +43,37 @@ modelTest("an ASR-only model refuses the diarize role with UnsupportedRole", MOD
   }
 });
 
-modelTest("sortformer serves asr and diarize; diarizeInfo", SORTFORMER_MODEL, async () => {
+modelTest("sortformer serves only diarize; diarizeInfo; ASR calls are refused", SORTFORMER_MODEL, async () => {
   const m = await TranscribeModel.load(SORTFORMER_MODEL);
   try {
-    assert.deepEqual(m.roles, ["asr", "diarize"]);
+    assert.deepEqual(m.roles, ["diarize"]);
     assert.deepEqual(m.diarizeInfo, { sampleRate: 16000, maxSpeakers: 4 });
     assert.equal(m.accepts({ kind: "sortformer_diarize" }), true);
+    assert.throws(() => m.capabilities, UnsupportedRole);
+    assert.throws(() => m.createSession(), UnsupportedRole);
   } finally {
     m.dispose();
   }
 });
 
-// Compares against the ASR path (Session.run with the SFST preset), which a
-// later commit removes; drop the comparison then.
-modelTest("diarize run returns the ASR path's speaker turns for the same preset", SORTFORMER_MODEL, async () => {
-  const m = await TranscribeModel.load(SORTFORMER_MODEL);
+// Goldens are CPU (as sortformer_diarize_unit): (t0Ms, t1Ms, speakerId),
+// grouped by speaker and time-ordered within one.
+const GOLDEN = {
+  default: [[320, 2400, 1], [7360, 9360, 1], [10240, 10640, 1], [4240, 6640, 2], [9760, 12000, 2]],
+  low_latency: [[320, 2480, 1], [7360, 9360, 1], [10240, 10640, 1], [4160, 6640, 2], [9760, 12000, 2]],
+};
+
+modelTest("diarize run returns the golden speaker turns per preset", SORTFORMER_MODEL, async () => {
+  const m = await TranscribeModel.load(SORTFORMER_MODEL, { backend: "cpu" });
   try {
     const pcm = mix();
     const d = m.createDiarizeSession({ nThreads: 4 });
-    const s = m.createSession();
-    for (const preset of ["default", "low_latency"]) {
+    for (const [preset, want] of Object.entries(GOLDEN)) {
       const rows = await d.run(pcm, { family: { kind: "sortformer_diarize", preset } });
-      assert.ok(rows.length > 0, preset);
-      for (const r of rows) assert.ok(r.speakerId >= 1 && r.speakerId <= 4 && r.t1Ms > r.t0Ms);
-      const asr = await s.run(pcm, { family: { kind: "sortformer", preset } });
-      assert.deepEqual(rows, asr.speakerSegments, preset);
+      assert.deepEqual(rows.map((r) => [r.t0Ms, r.t1Ms, r.speakerId]), want, preset);
     }
     assert.ok(d.timings.encodeMs > 0);
     d.dispose();
-    s.dispose();
   } finally {
     m.dispose();
   }
@@ -86,7 +88,11 @@ modelTest("a bad preset or wrong-slot extension is rejected", SORTFORMER_MODEL, 
       () => d.run(pcm, { family: { kind: "sortformer_diarize", preset: "ultra_low_latency" } }),
       (e) => e instanceof TranscribeError && /invalid sortformer preset/.test(e.message),
     );
-    await assert.rejects(() => d.run(pcm, { family: { kind: "sortformer" } }), InvalidArgument);
+    await assert.rejects(() => d.run(pcm, { family: { kind: "whisper" } }), InvalidArgument);
+    await assert.rejects(
+      () => d.run(pcm, { family: { kind: "sortformer" } }),
+      (e) => e instanceof InvalidArgument && /unknown family extension kind/.test(e.message),
+    );
     assert.ok((await d.run(pcm)).length > 0);
     d.dispose();
   } finally {
@@ -98,26 +104,6 @@ modelTest("a bad preset or wrong-slot extension is rejected", SORTFORMER_MODEL, 
 // Busy is not covered here: Sortformer cannot begin a stream, so no model
 // serves both a stream lease and the diarize role. The refusal is the same
 // SessionCore.exclusive gate compute-rules.test.mjs covers for Session.
-
-// Also uses the Sortformer ASR path (Session.run); drop it with that path.
-modelTest("a diarize run and an ASR run on one model are exclusive", SORTFORMER_MODEL, async () => {
-  const m = await TranscribeModel.load(SORTFORMER_MODEL);
-  try {
-    const d = m.createDiarizeSession();
-    const s = m.createSession();
-    const order = [];
-    const pd = d.run(mix()).then((r) => (order.push("d"), r));
-    const ps = s.run(mix()).then((r) => (order.push("s"), r));
-    await Promise.resolve();
-    assert.throws(() => d.timings, /run\(\).*in flight/);
-    assert.doesNotThrow(() => s.limits);
-    const [rows, r] = await Promise.all([pd, ps]);
-    assert.deepEqual(order, ["d", "s"]);
-    assert.deepEqual(rows, r.speakerSegments);
-  } finally {
-    m.dispose();
-  }
-});
 
 modelTest("the abort listener lives only for the call; a pre-aborted run raises Aborted", SORTFORMER_MODEL, async () => {
   const m = await TranscribeModel.load(SORTFORMER_MODEL);

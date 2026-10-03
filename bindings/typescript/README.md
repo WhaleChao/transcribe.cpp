@@ -112,8 +112,10 @@ model.accepts({ kind: "whisper" }); // does this model take that extension?
 ### Diarization (DIARIZE role)
 
 `model.roles` lists what a model serves (`"asr"`, `"diarize"`). A diarization
-model (e.g. Sortformer) answers who spoke when; ASR calls on a model without
-`"asr"`, and diarize calls on one without `"diarize"`, throw `UnsupportedRole`.
+model (e.g. Sortformer, which serves only `"diarize"`) answers who spoke when;
+ASR calls (`capabilities`, `createSession`, `transcribe`, ...) on a model
+without `"asr"`, and diarize calls on one without `"diarize"`, throw
+`UnsupportedRole`.
 
 ```ts
 const { sampleRate, maxSpeakers } = model.diarizeInfo;
