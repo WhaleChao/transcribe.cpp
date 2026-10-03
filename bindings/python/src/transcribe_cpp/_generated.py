@@ -13,7 +13,7 @@ import ctypes as _c
 # Stable digest of the ABI surface below (structs, enums, macros, layout,
 # prototypes). A native provider package echoes this back so the API
 # package can reject an ABI-mismatched provider before dlopen.
-PUBLIC_HEADER_HASH = "59b9a92b47074666"
+PUBLIC_HEADER_HASH = "8c53a55291ec1597"
 
 # === enum constants ===
 TRANSCRIBE_OK = 0
@@ -116,6 +116,7 @@ TRANSCRIBE_WHISPER_PROMPT_FIRST_SEGMENT = 0
 TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS = 1
 
 # === macro constants (integer object-like macros) ===
+TRANSCRIBE_BACKEND_MASK_ALL = 4294967295
 TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM = 1414746957
 TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM = 1396853584
 TRANSCRIBE_EXT_KIND_PARAKEET_STREAM = 1414744912
@@ -125,6 +126,8 @@ TRANSCRIBE_EXT_KIND_WHISPER_RUN = 1314015319
 
 # === structs ===
 class transcribe_ext(_c.Structure):
+    pass
+class transcribe_backend_init_params(_c.Structure):
     pass
 class transcribe_device_info(_c.Structure):
     pass
@@ -170,6 +173,7 @@ class transcribe_whisper_chunk_trace(_c.Structure):
     pass
 
 transcribe_ext._fields_ = [("size", _c.c_uint64), ("kind", _c.c_uint32)]
+transcribe_backend_init_params._fields_ = [("struct_size", _c.c_uint64), ("artifact_dir", _c.c_char_p), ("allowed_backends", _c.c_uint32)]
 transcribe_device_info._fields_ = [("struct_size", _c.c_uint64), ("name", _c.c_char_p), ("description", _c.c_char_p), ("kind", _c.c_char_p), ("device_id", _c.c_char_p), ("memory_total", _c.c_uint64), ("memory_free", _c.c_uint64), ("device_type", _c.c_int)]
 transcribe_model_load_params._fields_ = [("struct_size", _c.c_uint64), ("backend", _c.c_int), ("device", _c.c_void_p)]
 transcribe_session_params._fields_ = [("struct_size", _c.c_uint64), ("n_threads", _c.c_int), ("kv_type", _c.c_int), ("n_ctx", _c.c_int32)]
@@ -215,6 +219,7 @@ ABI_STRUCT_IDS = {
 # C-compiler layout captured at generation (for offset self-check).
 STRUCT_LAYOUT = {
     'transcribe_ext': {'size': 16, 'align': 8, 'offsets': {'size': 0, 'kind': 8}},
+    'transcribe_backend_init_params': {'size': 24, 'align': 8, 'offsets': {'struct_size': 0, 'artifact_dir': 8, 'allowed_backends': 16}},
     'transcribe_device_info': {'size': 64, 'align': 8, 'offsets': {'struct_size': 0, 'name': 8, 'description': 16, 'kind': 24, 'device_id': 32, 'memory_total': 40, 'memory_free': 48, 'device_type': 56}},
     'transcribe_model_load_params': {'size': 24, 'align': 8, 'offsets': {'struct_size': 0, 'backend': 8, 'device': 16}},
     'transcribe_session_params': {'size': 24, 'align': 8, 'offsets': {'struct_size': 0, 'n_threads': 8, 'kv_type': 12, 'n_ctx': 16}},
@@ -245,8 +250,12 @@ def configure(lib):
     lib.transcribe_abi_struct_align.argtypes = [_c.c_int]
     lib.transcribe_abi_struct_size.restype = _c.c_size_t
     lib.transcribe_abi_struct_size.argtypes = [_c.c_int]
+    lib.transcribe_allowed_backends.restype = _c.c_uint32
+    lib.transcribe_allowed_backends.argtypes = []
     lib.transcribe_backend_available.restype = _c.c_bool
     lib.transcribe_backend_available.argtypes = [_c.c_int]
+    lib.transcribe_backend_init_params_init.restype = None
+    lib.transcribe_backend_init_params_init.argtypes = [_c.POINTER(transcribe_backend_init_params)]
     lib.transcribe_batch_detected_language.restype = _c.c_char_p
     lib.transcribe_batch_detected_language.argtypes = [_c.c_void_p, _c.c_int]
     lib.transcribe_batch_full_text.restype = _c.c_char_p
@@ -315,6 +324,8 @@ def configure(lib):
     lib.transcribe_init_backends.argtypes = [_c.c_char_p]
     lib.transcribe_init_backends_default.restype = _c.c_int
     lib.transcribe_init_backends_default.argtypes = []
+    lib.transcribe_init_backends_ex.restype = _c.c_int
+    lib.transcribe_init_backends_ex.argtypes = [_c.POINTER(transcribe_backend_init_params)]
     lib.transcribe_log_set.restype = None
     lib.transcribe_log_set.argtypes = [_c.CFUNCTYPE(None, _c.c_int, _c.c_char_p, _c.c_void_p), _c.c_void_p]
     lib.transcribe_model_accepts_ext_kind.restype = _c.c_bool
