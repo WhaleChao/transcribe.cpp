@@ -651,6 +651,11 @@ int run_asr_file(const cli_args & args, std::ofstream * output) {
             std::printf("  license:    %s\n", lic);
         }
 
+        const uint32_t roles = transcribe_model_roles(model);
+        if (args.role == "diarize" || (args.role.empty() && (roles & TRANSCRIBE_ROLE_ASR) == 0)) {
+            return transcribe_cli::run_diarize_file(args, model, pcm, duration_s);
+        }
+
         struct transcribe_session_params cp;
         transcribe_session_params_init(&cp);
         cp.n_threads                        = args.n_threads;

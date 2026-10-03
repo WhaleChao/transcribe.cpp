@@ -75,33 +75,36 @@ struct cli_args {
     // ms-aligned chunks instead of one transcribe_run call. Requires
     // the loaded model to advertise supports_streaming. Set by
     // --stream-chunk-ms N.
-    int stream_chunk_ms      = 0;
+    int         stream_chunk_ms      = 0;
     // Parakeet streaming: pick a right-context (lookahead) setting
     // from the model's training menu. -1 = model default (max
     // accuracy / max latency); 0/1/6/13 select the published
     // nemotron-speech-streaming-en-0.6b settings. Set by
     // --stream-att-right N. Ignored when stream_chunk_ms == 0.
-    int stream_att_right     = -1;
+    int         stream_att_right     = -1;
     // Parakeet buffered streaming (parakeet-unified-en-0.6b): override
     // the (L, C, R) attention context tuple in milliseconds. -1 = use
     // the model's default (highest-accuracy row of the training menu).
     // Frame-aligned: the lib rounds each value down to the nearest
     // post-subsample frame (80ms at 4x subsampling). Ignored when
     // stream_chunk_ms == 0 or when the model is not buffered-streaming.
-    int stream_buf_left_ms   = -1;
-    int stream_buf_chunk_ms  = -1;
-    int stream_buf_right_ms  = -1;
+    int         stream_buf_left_ms   = -1;
+    int         stream_buf_chunk_ms  = -1;
+    int         stream_buf_right_ms  = -1;
     // Voxtral Realtime streaming: transcription delay in 12.5 Hz audio
     // tokens (80 ms each). -1 = model default (6 = 480 ms). Set by
     // --stream-voxtral-delay N. Ignored when stream_chunk_ms == 0 or when
     // the model is not voxtral_realtime.
-    int stream_voxtral_delay = -1;
+    int         stream_voxtral_delay = -1;
     // Speculative-decode draft length passed through to
     // transcribe_run_params::spec_k_drafts on the offline path. -1 = family
     // default (each family picks its tuned K). 0 = explicitly off. >0 =
     // explicit K. Silently ignored by families without
     // supports_spec_decode. Set by --spec-k-drafts N.
-    int spec_k_drafts        = -1;
+    int         spec_k_drafts        = -1;
+    // --role asr|diarize: which role to run on a multi-role model. Empty =
+    // ASR when the model serves it, else diarize.
+    std::string role;
 };
 
 // Minimal JSON string escape (main.cpp).
@@ -115,5 +118,12 @@ bool write_output_file(std::ofstream * output, const std::string & path, const c
 // process exit code.
 int run_asr_batch(const cli_args & args, std::ofstream * output);
 int run_asr_file(const cli_args & args, std::ofstream * output);
+
+// DIARIZE driver (diarize.cpp): runs on a model run_asr_file already loaded
+// and printed. Takes ownership of the model.
+int run_diarize_file(const cli_args &           args,
+                     transcribe_model *         model,
+                     const std::vector<float> & pcm,
+                     double                     duration_s);
 
 }  // namespace transcribe_cli

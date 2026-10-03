@@ -114,6 +114,8 @@ void print_usage(const char * argv0) {
                  "                        supports_spec_decode. -1 = family default,\n"
                  "                        0 = off, > 0 = explicit K. Silently ignored\n"
                  "                        by families without spec support.\n"
+                 "  --role ROLE           asr or diarize, for a model serving both\n"
+                 "                        (default: asr when available)\n"
                  "  --list-devices        list registered compute devices (with memory)\n"
                  "                        and exit; ignores all other options\n"
                  "  -h, --help            show this help\n",
@@ -485,6 +487,16 @@ bool parse_args(int argc, char ** argv, cli_args & out) {
             out.spec_k_drafts = std::atoi(v);
             if (out.spec_k_drafts < -1) {
                 std::fprintf(stderr, "error: --spec-k-drafts must be -1 (family default), 0 (off), or > 0\n");
+                return false;
+            }
+        } else if (a == "--role") {
+            const char * v = take_value(a.c_str());
+            if (!v) {
+                return false;
+            }
+            out.role = v;
+            if (out.role != "asr" && out.role != "diarize") {
+                std::fprintf(stderr, "error: --role must be asr or diarize\n");
                 return false;
             }
         } else if (!a.empty() && a[0] == '-') {
