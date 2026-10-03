@@ -85,7 +85,7 @@ struct transcribe_model {
 
     // Basis for the session-level limits query (transcribe_session_get_limits).
     // A hard-context-cap family fills this at load() — the same place it
-    // computes caps.max_audio_ms — so the generic query in transcribe.cpp can
+    // computes caps.max_audio_ms — so the generic query in transcribe-asr.cpp can
     // recompute the effective limits for any session n_ctx without a
     // per-family hook. Left zero by unbounded / soft-window families (which
     // have no decoder context cap): zero model_max_ctx => the query reports

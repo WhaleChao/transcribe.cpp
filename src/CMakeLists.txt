@@ -12,6 +12,7 @@
 
 add_library(transcribe
     transcribe.cpp
+    transcribe-asr.cpp
     transcribe-loader.cpp
     transcribe-arch.cpp
     transcribe-meta.cpp

@@ -1,9 +1,9 @@
 // transcribe-abi.h - internal helpers for the size-aware public ABI.
 //
-// Shared by the central dispatcher (transcribe.cpp) and per-family public
-// accessors (e.g. arch/whisper/public.cpp) so the struct_size validation
-// and copy-out truncation logic lives in exactly one place. Not part of
-// the public API.
+// Shared by the public dispatchers (transcribe.cpp, transcribe-asr.cpp) and
+// per-family public accessors (e.g. arch/whisper/public.cpp) so the raw enum
+// reads, struct_size validation and copy-out truncation logic live in
+// exactly one place. Not part of the public API.
 
 #pragma once
 
@@ -13,6 +13,23 @@
 #include <cstring>
 
 namespace transcribe {
+
+// Raw enum reads at the public ABI boundary
+//
+// C callers can store ANY int in an enum-typed ABI field; in C++ loading an
+// out-of-range value through an enum-typed lvalue is UB (UBSan traps it). So
+// every public entry point reads caller-supplied enum values as raw bytes
+// first, validates the raw int, and only then converts to the enum type. All
+// public enums are int-sized; the static_assert below pins one.
+
+inline int enum_field_raw(const void * field) {
+    int raw;
+    std::memcpy(&raw, field, sizeof(raw));
+    return raw;
+}
+
+static_assert(sizeof(transcribe_backend_request) == sizeof(int),
+              "public enums must be int-sized for raw boundary reads");
 
 // Strict size check for every caller-owned struct (inputs AND outputs):
 // struct_size smaller than the prefix the library relies on is rejected.
