@@ -97,7 +97,6 @@ __all__ = [
     "MoonshineStreamingOptions",
     "ParakeetStreamOptions",
     "ParakeetBufferedStreamOptions",
-    "SortformerStreamOptions",
     "SortformerDiarizeOptions",
     "VoxtralRealtimeStreamOptions",
     "Backend",
@@ -903,10 +902,10 @@ class VoxtralRealtimeStreamOptions(FamilyExtension):
             ext.min_decode_interval_ms = self.min_decode_interval_ms
 
 
-class SortformerStreamOptions(FamilyExtension):
-    """Sortformer streaming operating-point options (run slot).
+class SortformerDiarizeOptions(FamilyExtension):
+    """Sortformer operating-point options for ``DiarizeSession.run()``
+    (diarize-run slot).
 
-    Sortformer is a diarizer: a run produces speaker segments, no text.
     ``preset`` selects the latency / accuracy trade-off from the model's
     published menu; ``"default"`` keeps the GGUF-shipped checkpoint
     configuration. ``"very_high_latency"`` (~30 s lookahead) is the
@@ -914,10 +913,10 @@ class SortformerStreamOptions(FamilyExtension):
     real-time point and costs substantially more compute per audio
     second."""
 
-    _slot = "run"
-    _kind = _generated.TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM
-    _struct = _generated.transcribe_sortformer_stream_ext
-    _init = "transcribe_sortformer_stream_ext_init"
+    _slot = "diarize_run"
+    _kind = _generated.TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE
+    _struct = _generated.transcribe_sortformer_diarize_ext
+    _init = "transcribe_sortformer_diarize_ext_init"
 
     _presets = {
         "default": _generated.TRANSCRIBE_SORTFORMER_PRESET_DEFAULT,
@@ -935,20 +934,6 @@ class SortformerStreamOptions(FamilyExtension):
     def _apply(self, ext) -> None:
         if self.preset is not None:
             ext.preset = self._presets[self.preset]
-
-
-class SortformerDiarizeOptions(FamilyExtension):
-    """Sortformer operating-point options for ``DiarizeSession.run()``
-    (diarize-run slot); same presets as :class:`SortformerStreamOptions`."""
-
-    _slot = "diarize_run"
-    _kind = _generated.TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE
-    _struct = _generated.transcribe_sortformer_diarize_ext
-    _init = "transcribe_sortformer_diarize_ext_init"
-
-    _presets = SortformerStreamOptions._presets
-    __init__ = SortformerStreamOptions.__init__
-    _apply = SortformerStreamOptions._apply
 
 
 # --- high-level handles ---------------------------------------------------

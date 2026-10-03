@@ -78,7 +78,8 @@ rows (`speaker_id` in `1..model.diarize_info.max_speakers`), grouped by
 speaker. It shares the model-wide compute lock with transcription runs and
 raises `Busy` while a stream is active. `cancel()` and `close()` work as on
 `Session`. A model without the role raises `UnsupportedRole`, as
-`model.session()` does on a model without `Role.ASR`.
+`model.session()` and `model.capabilities` do on a model without `Role.ASR`
+(Sortformer serves only `Role.DIARIZE`).
 
 ```python
 with model.diarize_session() as diarizer:

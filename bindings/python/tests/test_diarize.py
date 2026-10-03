@@ -24,8 +24,18 @@ def _turns(rows):
 
 def test_sortformer_roles_and_info(sortformer_model_path):
     with t.Model(sortformer_model_path) as model:
-        assert model.roles == {t.Role.ASR, t.Role.DIARIZE}
+        assert model.roles == {t.Role.DIARIZE}
         assert model.diarize_info == t.DiarizeInfo(sample_rate=16000, max_speakers=4)
+
+
+def test_sortformer_rejects_asr(sortformer_model_path):
+    with t.Model(sortformer_model_path) as model:
+        with pytest.raises(t.UnsupportedRole):
+            model.capabilities
+        with pytest.raises(t.UnsupportedRole):
+            model.session()
+        with model.diarize_session():  # the DIARIZE role still opens
+            pass
 
 
 def test_asr_only_model_rejects_diarize(model_path):
@@ -37,24 +47,25 @@ def test_asr_only_model_rejects_diarize(model_path):
             model.diarize_session()
 
 
-# TEMPORARY: Sortformer still serves the ASR role, whose Session.run returns
-# the same speaker turns on Result.speaker_segments. This cross-check goes
-# away when that ASR path is removed in a later commit.
-@pytest.mark.parametrize("preset", ["default", "low_latency"])
-def test_diarize_run_matches_asr_path(sortformer_model_path, mix_pcm, preset):
-    with t.Model(sortformer_model_path) as model:
+# CPU goldens on the oracle mix, (t0_ms, t1_ms, speaker_id) grouped by speaker.
+GOLDEN = {
+    "default": [(320, 2400, 1), (7360, 9360, 1), (10240, 10640, 1),
+                (4240, 6640, 2), (9760, 12000, 2)],
+    "low_latency": [(320, 2480, 1), (7360, 9360, 1), (10240, 10640, 1),
+                    (4160, 6640, 2), (9760, 12000, 2)],
+}
+
+
+@pytest.mark.parametrize("preset", sorted(GOLDEN))
+def test_diarize_run_golden_segments(sortformer_model_path, mix_pcm, preset):
+    with t.Model(sortformer_model_path, backend="cpu") as model:
         with model.diarize_session() as d:
             rows = d.run(mix_pcm, family=t.SortformerDiarizeOptions(preset=preset))
             timings = d.timings
-        with model.session() as s:
-            asr = s.run(mix_pcm, family=t.SortformerStreamOptions(preset=preset))
-            with pytest.raises(t.InvalidArgument, match="slot"):
-                s.run(mix_pcm, family=t.SortformerDiarizeOptions())
-    assert rows and isinstance(rows, list)
+    assert isinstance(rows, list)
     assert all(isinstance(r, t.SpeakerSegment) for r in rows)
-    assert {r.speaker_id for r in rows} <= {1, 2, 3, 4}
     assert all(math.isnan(r.p) for r in rows)  # Sortformer has no per-turn p
-    assert _turns(rows) == _turns(asr.speaker_segments)
+    assert _turns(rows) == GOLDEN[preset]
     assert timings.encode_ms > 0
 
 
@@ -74,7 +85,7 @@ def test_bad_preset_rejected(sortformer_model_path, mix_pcm):
         with pytest.raises(t.InvalidArgument):
             d.run(mix_pcm, family=OutOfRange(preset="bogus"))  # type: ignore[arg-type]
         with pytest.raises(t.InvalidArgument, match="slot"):
-            d.run(mix_pcm, family=t.SortformerStreamOptions())
+            d.run(mix_pcm, family=t.WhisperRunOptions())
         assert d.run(mix_pcm)  # still usable
 
 

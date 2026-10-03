@@ -168,7 +168,7 @@ def voxtral_model_path() -> Path:
 
 @pytest.fixture(scope="session")
 def sortformer_model_path() -> Path:
-    """Sortformer diarizer (serves the ASR and DIARIZE roles)."""
+    """Sortformer diarizer (serves only the DIARIZE role)."""
     return _family_model("TRANSCRIBE_SMOKE_SORTFORMER_MODEL", SORTFORMER_MODEL)
 
 
