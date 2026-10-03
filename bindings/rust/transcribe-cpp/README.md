@@ -116,6 +116,28 @@ finish `init_backends()` or `init_backends_default()` before any thread
 enumerates devices, queries backend availability, or loads a model; native
 registry mutation is a startup-only operation and must not race those calls.
 
+## Serialization (`serde`)
+
+The optional `serde` feature derives `Serialize`/`Deserialize` on the plain-data
+types: `RunOptions`, `StreamOptions`, `SessionOptions`, the family extensions,
+`Transcript` and its rows, `StreamUpdate`, `StreamText`, `Capabilities`,
+`SessionLimits`, and the parameter enums. Use it to send requests and results
+across a process boundary (e.g. running inference in a crash-isolated worker)
+or to persist them.
+
+```bash
+cargo add transcribe-cpp --features serde
+```
+
+- Handles (`Model`, `Session`, `Stream`, `Device`) and `Error` are not
+  serializable. Send `Backend` plus a persisted `device_id` and resolve the
+  `Device` in the receiving process; map `Error` into your own wire type.
+- Option and result structs are `#[serde(default)]`, so a document missing
+  fields decodes with the `Default` values.
+- `Token::p` and `SpeakerSegment::p` are NaN when a family reports no
+  confidence. JSON writes NaN as `null`, which decodes back to NaN; binary
+  formats keep the raw value.
+
 ## Packaging a distributable (`shared` / `dynamic-backends`)
 
 With the **default static** build there is nothing to do — the native code is
