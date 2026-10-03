@@ -109,40 +109,31 @@ README if you need runtime-loaded backend modules or custom
 
 `devices()` returns process-local `Device` handles. Leave
 `ModelOptions::device` as `None` for the backend's automatic policy, or pass
-`Some(device)` to select that exact primary device with no fallback. Registry
-indices and handles are not stable across processes, so to remember a device
-persist an identity instead: `device_id` when it is `Some` (the PCI bus id for
-PCI devices), otherwise `kind` plus `name` and `description` (Metal reports
-no `device_id`). After backend initialization, resolve a fresh handle by
-filtering `devices()` on that identity. In dynamic-backend builds,
+`Some(device)` to select that exact primary device with no fallback. Handles
+are not stable across processes; persist `device_id` when it is `Some`,
+otherwise `kind` + `name` + `description` (e.g. Metal), and later re-find the
+device in `devices()` after backend initialization. In dynamic-backend builds,
 finish `init_backends()` or `init_backends_default()` before any thread
 enumerates devices, queries backend availability, or loads a model; native
 registry mutation is a startup-only operation and must not race those calls.
 
 ## Serialization (`serde`)
 
-The optional `serde` feature derives `Serialize`/`Deserialize` on the plain-data
-types: `RunOptions`, `StreamOptions`, `SessionOptions`, the family extensions,
-`Transcript` and its rows, `StreamUpdate`, `StreamText`, `Capabilities`,
-`SessionLimits`, `DeviceType`, and the parameter enums. Use it to send requests and results
-across a process boundary (e.g. running inference in a crash-isolated worker)
-or to persist them.
+The optional `serde` feature derives `Serialize`/`Deserialize` on the
+plain-data option and result types and enums, so requests and results can
+cross a process boundary (e.g. a crash-isolated worker) or be persisted.
 
 ```bash
 cargo add transcribe-cpp --features serde
 ```
 
 - Handles (`Model`, `Session`, `Stream`, `Device`) and `Error` are not
-  serializable. Send `Backend` plus the device identity described under
-  [Exact device selection](#exact-device-selection) and resolve the `Device`
-  in the receiving process; map `Error` into your own wire type.
-- Option and result structs are `#[serde(default)]`, so in self-describing
-  formats such as JSON a document missing fields decodes with the `Default`
-  values. Positional binary formats (postcard, bincode) get no such tolerance:
-  both sides must be built from the same crate version.
-- `Token::p` and `SpeakerSegment::p` are NaN when a family reports no
-  confidence. JSON writes NaN as `null`, which decodes back to NaN; binary
-  formats keep the raw value.
+  serializable. Send a [device identity](#exact-device-selection) and resolve
+  the `Device` on the other side; map `Error` to your own type.
+- In JSON, missing fields take their `Default`. Binary formats (postcard,
+  bincode) need both sides on the same crate version.
+- A NaN confidence (`Token::p`, `SpeakerSegment::p`) is written to JSON as
+  `null` and read back as NaN; a missing `p` also reads as NaN.
 
 ## Packaging a distributable (`shared` / `dynamic-backends`)
 

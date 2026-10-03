@@ -34,10 +34,8 @@ openmp = ["transcribe-cpp-sys/openmp"]
 # via the -sys feature). See notes/rust-dynamic-backends-plan.md.
 shared = ["transcribe-cpp-sys/shared"]
 dynamic-backends = ["shared", "transcribe-cpp-sys/dynamic-backends"]
-# `serde` derives Serialize/Deserialize on the plain-data option and result
-# types (RunOptions, StreamOptions, Transcript, StreamUpdate, ...) so they can
-# cross a process boundary or be persisted. Handles (Model, Session, Device)
-# and Error are deliberately not serializable. No native-build impact.
+# Serialize/Deserialize on the plain-data option and result types (not handles
+# or Error). No native-build impact.
 serde = ["dep:serde"]
 
 [dependencies]

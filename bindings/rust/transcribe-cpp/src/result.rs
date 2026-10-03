@@ -75,7 +75,10 @@ pub struct SpeakerSegment {
     pub t0_ms: i64,
     pub t1_ms: i64,
     pub speaker_id: i32,
-    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_from_null"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default = "nan", deserialize_with = "nan_from_null")
+    )]
     pub p: f32,
 }
 
@@ -105,7 +108,10 @@ pub struct Word {
 )]
 pub struct Token {
     pub id: i32,
-    #[cfg_attr(feature = "serde", serde(deserialize_with = "nan_from_null"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default = "nan", deserialize_with = "nan_from_null")
+    )]
     pub p: f32,
     pub t0_ms: i64,
     pub t1_ms: i64,
@@ -128,9 +134,14 @@ pub struct Timings {
     pub decode_ms: f32,
 }
 
-/// Deserialize a NaN-able confidence. Text formats such as JSON have no NaN
-/// and write it as `null`; read that back as NaN so the round-trip holds.
-/// Binary formats carry the raw `f32` (NaN included), so read it as-is.
+/// A missing confidence means "none reported" (NaN), not 0.0.
+#[cfg(feature = "serde")]
+fn nan() -> f32 {
+    f32::NAN
+}
+
+/// JSON writes NaN as `null`; read it back as NaN. Binary formats carry the
+/// raw `f32`.
 #[cfg(feature = "serde")]
 fn nan_from_null<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
     use serde::Deserialize;
