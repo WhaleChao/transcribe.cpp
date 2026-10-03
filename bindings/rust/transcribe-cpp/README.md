@@ -78,12 +78,9 @@ let transcript = stream.snapshot(); // language, segments, words, tokens, timing
 
 ### Diarization (who spoke when)
 
-`model.roles()` reports what a model can do. A model with `Role::Diarize`
-(e.g. Sortformer, which is DIARIZE-only) opens a `DiarizeSession`, whose `run`
-returns speaker turns (`SpeakerSegment`: `t0_ms`, `t1_ms`, 1-based
-`speaker_id`). ASR-only calls such as `capabilities()` and `session()` return
-`Error::UnsupportedRole` on a model without `Role::Asr`, and the diarize calls
-do the same without `Role::Diarize`.
+A model whose `roles()` contain `Role::Diarize` (e.g. Sortformer) opens a
+`DiarizeSession` that returns speaker turns; calls for a role the model lacks
+return `Error::UnsupportedRole`.
 
 ```rust
 use transcribe_cpp::{DiarizeOptions, Model, Role};
@@ -95,10 +92,6 @@ for turn in diarize.run(&pcm, &DiarizeOptions::default())? {
 }
 # Ok::<(), transcribe_cpp::Error>(())
 ```
-
-`DiarizeOptions::family` takes `DiarizeExtension::Sortformer` with a
-`SortformerPreset`. Diarize runs share the model-wide compute lock with ASR
-sessions and accept a `CancelToken`.
 
 Runnable examples:
 

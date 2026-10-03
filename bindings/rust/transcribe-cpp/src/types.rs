@@ -392,9 +392,4 @@ impl Roles {
         };
         self.0 & bit.0 != 0
     }
-
-    /// The raw `transcribe_role` bitmask.
-    pub fn bits(self) -> u32 {
-        self.0
-    }
 }

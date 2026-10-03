@@ -82,17 +82,9 @@ pub(crate) struct ModelInner {
 }
 
 impl ModelInner {
-    /// Run `f` under the model's compute lock. Every call that drives native
-    /// compute, on any session type of this model (run, batch, diarize run,
-    /// stream begin/feed/finalize/reset/drop), goes through here.
-    ///
-    /// Under the lock, in order: if `refuse_if_streaming` is `Some(msg)` and a
-    /// stream on this model holds the lease, return `Error::Busy(msg)` without
-    /// calling `f`; otherwise call `f` with the lease flag (so a stream
-    /// begin/end can take or release the lease atomically with its native
-    /// call). Pass `None` from the stream that holds the lease; the call then
-    /// never fails. The lock is released when this returns, so callers copy
-    /// results out of their session's own result storage afterwards.
+    /// Run `f` under the model's compute lock; every native compute call goes
+    /// through here. With `Some(msg)`, returns `Error::Busy(msg)` instead if a
+    /// stream holds the lease. `f` gets the lease flag to take or release it.
     pub(crate) fn with_compute<R>(
         &self,
         refuse_if_streaming: Option<&str>,

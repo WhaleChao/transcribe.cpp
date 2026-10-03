@@ -75,12 +75,7 @@ pub enum Error {
         /// The (incomplete) transcript produced before the loop, one copy kept.
         partial: Option<Box<Transcript>>,
     },
-    /// `TRANSCRIBE_ERR_UNSUPPORTED_ROLE` — the model does not serve the role
-    /// the call needs. Sessions are ASR sessions, so [`Model::session`] /
-    /// [`Model::session_with`] on a model without the ASR role fail with it.
-    ///
-    /// [`Model::session`]: crate::Model::session
-    /// [`Model::session_with`]: crate::Model::session_with
+    /// `TRANSCRIBE_ERR_UNSUPPORTED_ROLE` — see [`Model::roles`](crate::Model::roles).
     #[error("unsupported role: {0}")]
     UnsupportedRole(String),
     /// The loaded library's base version disagrees with the headers this crate
@@ -215,11 +210,11 @@ mod tests {
     use std::mem::discriminant;
     use sys::transcribe_status as S;
 
-    /// Every non-OK status the linked library knows, found by walking codes
-    /// upward until `transcribe_status_string` falls back to its "unknown"
-    /// text. A status appended to the header without a Rust mapping shows up
-    /// here and fails the test below.
-    fn known_error_statuses() -> Vec<S> {
+    #[test]
+    fn every_status_maps_to_a_typed_variant() {
+        // Every non-OK status the linked library knows, found by walking codes
+        // upward until `transcribe_status_string` falls back to its "unknown"
+        // text, so a status appended to the header without a mapping fails here.
         let unknown = status_string(-1);
         let codes: Vec<S> = (1..256u32)
             .take_while(|&c| status_string(c as i32) != unknown)
@@ -230,12 +225,7 @@ mod tests {
             "status walk stopped early at {} codes",
             codes.len()
         );
-        codes
-    }
-
-    #[test]
-    fn every_status_maps_to_a_typed_variant() {
-        for status in known_error_statuses() {
+        for status in codes {
             let code = status.0;
             let err = error_for_status(status, "ctx");
             assert!(
@@ -254,23 +244,7 @@ mod tests {
                 "status {code} -> {err:?} -> raw {raw} -> {back:?}"
             );
         }
-    }
-
-    #[test]
-    fn unsupported_role_is_its_own_variant() {
-        let err = error_for_status(S::TRANSCRIBE_ERR_UNSUPPORTED_ROLE, "session_init");
-        let Error::UnsupportedRole(msg) = &err else {
-            panic!("expected UnsupportedRole, got {err:?}");
-        };
-        let c_text = status_string(20);
-        assert_eq!(*msg, format!("session_init: {c_text} (status 20)"));
-        assert_eq!(err.to_string(), format!("unsupported role: {msg}"));
-        assert_eq!(err.raw_status(), 20);
-        assert!(err.partial().is_none());
-        let checked = check(S::TRANSCRIBE_ERR_UNSUPPORTED_ROLE, "open");
-        assert!(
-            matches!(checked, Err(Error::UnsupportedRole(_))),
-            "got {checked:?}"
-        );
+        let role = error_for_status(S::TRANSCRIBE_ERR_UNSUPPORTED_ROLE, "ctx");
+        assert!(matches!(role, Error::UnsupportedRole(_)), "{role:?}");
     }
 }

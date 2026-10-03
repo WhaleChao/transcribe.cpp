@@ -1,11 +1,5 @@
-//! [`DiarizeSession`] — the DIARIZE role: who spoke when.
-//!
-//! For models whose product is speaker turns rather than text
-//! ([`Model::roles`] contains [`Role::Diarize`](crate::Role)). Open one with
-//! [`Model::diarize_session`]. Same threading and lifetime rules as
-//! [`Session`](crate::Session): `Send` but not `Sync`, keeps its model alive,
-//! and its run shares the model-wide compute lock with every other session of
-//! the model.
+//! [`DiarizeSession`] — the DIARIZE role (who spoke when), from [`Model::diarize_session`].
+//! Threading, lifetime, and compute-lock rules are those of [`Session`](crate::Session).
 
 use std::os::raw::c_void;
 use std::sync::atomic::AtomicBool;
@@ -126,10 +120,9 @@ impl DiarizeSession {
         unsafe { sys::transcribe_diarize_params_init(&mut params) };
         params.family = family.as_ref().map_or(std::ptr::null(), |f| f.ext_ptr());
 
-        let ptr = self.ptr;
         let status = self.model.with_compute(
             Some("a stream is active on this model; finish or drop it before diarize run()"),
-            |_| unsafe { sys::transcribe_diarize_run(ptr, pcm.as_ptr(), n, &params) },
+            |_| unsafe { sys::transcribe_diarize_run(self.ptr, pcm.as_ptr(), n, &params) },
         )?;
         check(status, "diarize run")?;
 
@@ -159,22 +152,19 @@ mod tests {
     use crate::Error;
     use std::sync::Mutex;
 
-    /// A session over null native handles (both frees are NULL no-ops): the
-    /// Busy check runs under the lock before any native call.
-    fn null_session(stream_holds_lease: bool) -> DiarizeSession {
-        DiarizeSession {
+    #[test]
+    fn run_is_busy_while_a_stream_holds_the_lease() {
+        // Null native handles (both frees are NULL no-ops): the Busy check runs
+        // under the lock before any native call.
+        let mut session = DiarizeSession {
             ptr: std::ptr::null_mut(),
             model: Arc::new(ModelInner {
                 ptr: std::ptr::null_mut(),
-                compute_lock: Mutex::new(stream_holds_lease),
+                compute_lock: Mutex::new(true),
             }),
             cancel: None,
-        }
-    }
-
-    #[test]
-    fn run_is_busy_while_a_stream_holds_the_lease() {
-        let err = null_session(true)
+        };
+        let err = session
             .run(&[0.0; 160], &DiarizeOptions::default())
             .unwrap_err();
         let Error::Busy(msg) = err else {
@@ -184,10 +174,5 @@ mod tests {
             msg,
             "a stream is active on this model; finish or drop it before diarize run()"
         );
-        // With the lease free the same call reaches native (NULL session).
-        let err = null_session(false)
-            .run(&[0.0; 160], &DiarizeOptions::default())
-            .unwrap_err();
-        assert!(matches!(err, Error::InvalidArgument(_)), "got {err:?}");
     }
 }

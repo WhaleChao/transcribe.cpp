@@ -266,8 +266,8 @@ fn close_ordering_drop_model_before_session() {
 #[test]
 fn shared_model_across_threads_serializes() {
     // Model is Send+Sync; the per-model mutex serializes the compute path. Two
-    // threads each run on their own session of one shared model — they queue
-    // rather than race, and both succeed.
+    // threads each run (one as a batch) on their own session of one shared
+    // model — they queue rather than race (never Busy), and both succeed.
     let Some((model_path, pcm)) = common::smoke_fixtures("shared_model_across_threads_serializes")
     else {
         return;
@@ -275,12 +275,17 @@ fn shared_model_across_threads_serializes() {
     let model = Arc::new(Model::load(&model_path).unwrap());
     let pcm = Arc::new(pcm);
     let handles: Vec<_> = (0..2)
-        .map(|_| {
+        .map(|i| {
             let model = Arc::clone(&model);
             let pcm = Arc::clone(&pcm);
             thread::spawn(move || {
                 let mut s = model.session().unwrap();
-                s.run(&pcm, &RunOptions::default()).unwrap().text
+                let opts = RunOptions::default();
+                if i == 0 {
+                    s.run(&pcm, &opts).unwrap().text
+                } else {
+                    s.run_batch(&[&pcm], &opts).unwrap().remove(0).unwrap().text
+                }
             })
         })
         .collect();

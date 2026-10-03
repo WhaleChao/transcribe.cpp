@@ -1,6 +1,6 @@
-//! Cancellation: a clean baseline run, and a cross-thread timer cancel of an
-//! in-flight run on long (tiled) audio. Ports the Python C5 case. Skips the
-//! abort assertion if the machine wins the race (run finishes before cancel).
+//! Cancellation: a clean baseline run, a cross-thread timer cancel of an
+//! in-flight run on long (tiled) audio (ports the Python C5 case; skips the
+//! abort assertion if the run wins the race), and token retention.
 
 mod common;
 
@@ -71,4 +71,37 @@ fn cross_thread_cancel_of_in_flight_run() {
         }
         Err(other) => panic!("unexpected error: {other:?}"),
     }
+}
+
+#[test]
+fn cancel_token_is_retained_until_cleared() {
+    // The session keeps the installed token's flag alive (the caller may drop
+    // every handle) and keeps consulting it on later runs until cleared.
+    let Some((model_path, pcm)) = common::smoke_fixtures("cancel_token_is_retained_until_cleared")
+    else {
+        return;
+    };
+    let model = Model::load(&model_path).unwrap();
+    if !model.supports(Feature::Cancellation) {
+        eprintln!("skip: model does not support cancellation");
+        return;
+    }
+    let mut session = model.session().unwrap();
+    {
+        let token = CancelToken::new();
+        token.cancel();
+        session.set_cancel_token(&token);
+    } // every caller-side handle to the flag is gone
+
+    for attempt in 0..2 {
+        match session.run(&pcm, &RunOptions::default()) {
+            Err(Error::Aborted { .. }) => assert!(session.was_aborted()),
+            other => panic!("attempt {attempt}: pre-cancelled token must abort, got {other:?}"),
+        }
+    }
+
+    session.clear_cancel_token();
+    let result = session.run(&pcm, &RunOptions::default()).unwrap();
+    assert!(result.text.to_lowercase().contains("country"));
+    assert!(!session.was_aborted());
 }
