@@ -158,3 +158,51 @@ def test_second_stream_while_active_rejected(streaming_model_path, audio_pcm):
             stream.feed(audio_pcm[:16000])
             with pytest.raises(t.InvalidArgument):
                 session.stream()
+
+
+def test_run_while_stream_active_rejected(streaming_model_path, audio_pcm):
+    # A run cannot replace an active stream's results on the SAME session:
+    # the C dispatcher rejects it, the binding surfaces InvalidArgument, and
+    # the stream stays usable afterwards.
+    with t.Model(streaming_model_path) as model, model.session() as session:
+        with session.stream() as stream:
+            stream.feed(audio_pcm[:16000])
+            with pytest.raises(t.InvalidArgument):
+                session.run(audio_pcm[:16000])
+            with pytest.raises(t.InvalidArgument):
+                session.run_batch([audio_pcm[:16000]])
+            for i in range(16000, len(audio_pcm), 16000):
+                stream.feed(audio_pcm[i : i + 16000])
+            stream.finalize()
+            assert stream.state == "finished"
+            committed = stream.text().committed
+    assert "country" in committed.lower(), committed
+
+
+def test_stream_begin_clears_pending_cancel(streaming_model_path, audio_pcm):
+    # A cancel() requested before stream() is cleared by the begin: the new
+    # stream's feeds are not aborted by a stale flag. (A cancel() AFTER begin
+    # is honoured on the next feed — test_cancellation_aborts_pending_feed.)
+    with t.Model(streaming_model_path) as model, model.session() as session:
+        session.cancel()
+        with session.stream() as stream:
+            stream.feed(audio_pcm[:16000])
+            assert not session.was_aborted
+            assert stream.state == "active"
+
+
+def test_stream_keeps_session_and_model_alive(streaming_model_path, audio_pcm):
+    # The Stream holds a strong reference to its Session (which holds the
+    # Model): dropping every other reference must not free native handles
+    # under the stream.
+    import gc
+
+    stream = t.Model(streaming_model_path).session().stream()
+    gc.collect()
+    for i in range(0, len(audio_pcm), 16000):
+        stream.feed(audio_pcm[i : i + 16000])
+    stream.finalize()
+    assert "country" in stream.text().committed.lower()
+    stream.reset()
+    del stream
+    gc.collect()
