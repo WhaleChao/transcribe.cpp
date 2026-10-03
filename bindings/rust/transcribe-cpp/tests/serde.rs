@@ -8,9 +8,9 @@ use transcribe_cpp::{
     DiarizeOptions, DiarizeSessionOptions, ExtSlot, Feature, Itn, KvType,
     MoonshineStreamingOptions, ParakeetBufferedStreamOptions, ParakeetStreamOptions, Pnc, Role,
     Roles, RunExtension, RunOptions, Segment, SessionLimits, SessionOptions,
-    SortformerDiarizeOptions, SortformerPreset, SortformerStreamOptions, SpeakerSegment,
-    StreamExtension, StreamOptions, StreamState, StreamText, StreamUpdate, Task, TimestampKind,
-    Timings, Token, Transcript, VoxtralRealtimeStreamOptions, WhisperRunOptions, Word,
+    SortformerDiarizeOptions, SortformerPreset, SpeakerSegment, StreamExtension, StreamOptions,
+    StreamState, StreamText, StreamUpdate, Task, TimestampKind, Timings, Token, Transcript,
+    VoxtralRealtimeStreamOptions, WhisperRunOptions, Word,
 };
 
 fn assert_serde<T: serde::Serialize + serde::de::DeserializeOwned>() {}
@@ -29,7 +29,6 @@ fn plain_data_types_are_serializable() {
     assert_serde::<ParakeetStreamOptions>();
     assert_serde::<ParakeetBufferedStreamOptions>();
     assert_serde::<VoxtralRealtimeStreamOptions>();
-    assert_serde::<SortformerStreamOptions>();
     assert_serde::<SortformerPreset>();
     assert_serde::<DiarizeOptions>();
     assert_serde::<DiarizeSessionOptions>();

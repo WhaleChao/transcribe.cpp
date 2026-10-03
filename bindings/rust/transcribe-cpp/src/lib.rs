@@ -69,7 +69,7 @@ pub use error::{Error, Result};
 pub use family::{
     DiarizeExtension, MoonshineStreamingOptions, ParakeetBufferedStreamOptions,
     ParakeetStreamOptions, RunExtension, SortformerDiarizeOptions, SortformerPreset,
-    SortformerStreamOptions, StreamExtension, VoxtralRealtimeStreamOptions, WhisperRunOptions,
+    StreamExtension, VoxtralRealtimeStreamOptions, WhisperRunOptions,
 };
 pub use logging::{disable_logging, init_logging};
 pub use model::{Capabilities, Model, ModelOptions, SessionLimits, SessionOptions};

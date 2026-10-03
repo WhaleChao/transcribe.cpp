@@ -111,7 +111,7 @@ pub fn smoke_itn_model() -> Option<PathBuf> {
     )
 }
 
-/// Sortformer diarizer (ASR + DIARIZE roles) plus its two-speaker sample, or
+/// Sortformer diarizer (DIARIZE role only) plus its two-speaker sample, or
 /// `None` (with a skip note) when either is absent.
 pub fn smoke_sortformer_fixtures(test: &str) -> Option<(PathBuf, Vec<f32>)> {
     let model = family_model(

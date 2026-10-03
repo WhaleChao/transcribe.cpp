@@ -8,9 +8,8 @@ mod common;
 
 use transcribe_cpp::sys::TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE as SFDR;
 use transcribe_cpp::{
-    CancelToken, DiarizeExtension, DiarizeOptions, Error, ExtSlot, Model, Role, RunExtension,
-    RunOptions, SortformerDiarizeOptions, SortformerPreset, SortformerStreamOptions,
-    SpeakerSegment,
+    Backend, CancelToken, DiarizeExtension, DiarizeOptions, Error, ExtSlot, Model, ModelOptions,
+    Role, SortformerDiarizeOptions, SortformerPreset, SpeakerSegment,
 };
 
 fn diarize_opts(preset: Option<SortformerPreset>) -> DiarizeOptions {
@@ -21,58 +20,69 @@ fn diarize_opts(preset: Option<SortformerPreset>) -> DiarizeOptions {
     }
 }
 
-fn rows(segs: &[SpeakerSegment]) -> Vec<(i64, i64, i32, u32)> {
+fn rows(segs: &[SpeakerSegment]) -> Vec<(i64, i64, i32)> {
     segs.iter()
-        .map(|s| (s.t0_ms, s.t1_ms, s.speaker_id, s.p.to_bits()))
+        .map(|s| (s.t0_ms, s.t1_ms, s.speaker_id))
         .collect()
 }
 
 #[test]
-fn sortformer_serves_asr_and_diarize() {
-    let Some((model_path, _)) =
-        common::smoke_sortformer_fixtures("sortformer_serves_asr_and_diarize")
+fn sortformer_is_diarize_only() {
+    let Some((model_path, _)) = common::smoke_sortformer_fixtures("sortformer_is_diarize_only")
     else {
         return;
     };
     let model = Model::load(&model_path).unwrap();
     let roles = model.roles();
-    assert!(roles.contains(Role::Asr) && roles.contains(Role::Diarize));
-    assert_eq!(roles.bits(), 0b11, "{roles:?}");
+    assert!(!roles.contains(Role::Asr) && roles.contains(Role::Diarize));
+    assert_eq!(roles.bits(), 0b10, "{roles:?}");
     let info = model.diarize_info().unwrap();
     assert_eq!((info.sample_rate, info.max_speakers), (16000, 4));
     assert!(model.accepts_ext(ExtSlot::DiarizeRun, SFDR));
     assert!(!model.accepts_ext(ExtSlot::Run, SFDR));
-    assert!(model.capabilities().is_ok());
+    assert!(matches!(
+        model.capabilities(),
+        Err(Error::UnsupportedRole(_))
+    ));
+    assert!(matches!(model.session(), Err(Error::UnsupportedRole(_))));
 }
 
 #[test]
-fn diarize_run_matches_asr_path_speaker_turns() {
+fn diarize_run_matches_cpu_golden_segments() {
     let Some((model_path, pcm)) =
-        common::smoke_sortformer_fixtures("diarize_run_matches_asr_path_speaker_turns")
+        common::smoke_sortformer_fixtures("diarize_run_matches_cpu_golden_segments")
     else {
         return;
     };
-    let model = Model::load(&model_path).unwrap();
-    let mut session = model.session().unwrap();
+    // Goldens are recorded on CPU (tests/sortformer_diarize_unit.cpp).
+    let cpu = ModelOptions {
+        backend: Backend::Cpu,
+        ..Default::default()
+    };
+    let model = Model::load_with(&model_path, &cpu).unwrap();
     let mut diarize = model.diarize_session().unwrap();
-    for preset in [None, Some(SortformerPreset::LowLatency)] {
+    let golden_default = [
+        (320, 2400, 1),
+        (7360, 9360, 1),
+        (10240, 10640, 1),
+        (4240, 6640, 2),
+        (9760, 12000, 2),
+    ];
+    let golden_low_latency = [
+        (320, 2480, 1),
+        (7360, 9360, 1),
+        (10240, 10640, 1),
+        (4160, 6640, 2),
+        (9760, 12000, 2),
+    ];
+    for (preset, golden) in [
+        (None, &golden_default),
+        (Some(SortformerPreset::Default), &golden_default),
+        (Some(SortformerPreset::LowLatency), &golden_low_latency),
+    ] {
         let turns = diarize.run(&pcm, &diarize_opts(preset)).unwrap();
-        assert!(!turns.is_empty(), "{preset:?}: no speaker turns");
-        assert!(turns.iter().all(|s| (1..=4).contains(&s.speaker_id)));
+        assert_eq!(rows(&turns), golden.to_vec(), "{preset:?}");
         assert!(diarize.timings().encode_ms > 0.0);
-
-        // PARITY with the ASR path (Session::run + SFST preset). The ASR path
-        // for Sortformer is removed in a later commit; drop this block then.
-        let asr = RunOptions {
-            family: Some(RunExtension::Sortformer(SortformerStreamOptions { preset })),
-            ..Default::default()
-        };
-        let transcript = session.run(&pcm, &asr).unwrap();
-        assert_eq!(
-            rows(&turns),
-            rows(&transcript.speaker_segments),
-            "{preset:?}"
-        );
     }
 }
 
