@@ -109,9 +109,12 @@ README if you need runtime-loaded backend modules or custom
 
 `devices()` returns process-local `Device` handles. Leave
 `ModelOptions::device` as `None` for the backend's automatic policy, or pass
-`Some(device)` to select that exact primary device with no fallback. Persist
-`device_id` and resolve a fresh handle after backend initialization; registry
-indices and handles are not stable across processes. In dynamic-backend builds,
+`Some(device)` to select that exact primary device with no fallback. Registry
+indices and handles are not stable across processes, so to remember a device
+persist an identity instead: `device_id` when it is `Some` (the PCI bus id for
+PCI devices), otherwise `kind` plus `name` and `description` (Metal reports
+no `device_id`). After backend initialization, resolve a fresh handle by
+filtering `devices()` on that identity. In dynamic-backend builds,
 finish `init_backends()` or `init_backends_default()` before any thread
 enumerates devices, queries backend availability, or loads a model; native
 registry mutation is a startup-only operation and must not race those calls.
@@ -130,8 +133,9 @@ cargo add transcribe-cpp --features serde
 ```
 
 - Handles (`Model`, `Session`, `Stream`, `Device`) and `Error` are not
-  serializable. Send `Backend` plus a persisted `device_id` and resolve the
-  `Device` in the receiving process; map `Error` into your own wire type.
+  serializable. Send `Backend` plus the device identity described under
+  [Exact device selection](#exact-device-selection) and resolve the `Device`
+  in the receiving process; map `Error` into your own wire type.
 - Option and result structs are `#[serde(default)]`, so in self-describing
   formats such as JSON a document missing fields decodes with the `Default`
   values. Positional binary formats (postcard, bincode) get no such tolerance:

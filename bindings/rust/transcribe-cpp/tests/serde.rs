@@ -211,25 +211,40 @@ fn real_transcript_round_trips() {
         return;
     };
     let model = Model::load(&model_path).unwrap();
+    let caps = model.capabilities();
+    // Request the finest granularity the model supports, so the richest real
+    // rows it can produce go through the round-trip. (The whisper-tiny canary
+    // tops out at segments; real token rows need a token-capable model, and
+    // the NaN-confidence case is covered by the synthetic test above.)
     let mut session = model.session().unwrap();
-    let options = RunOptions {
-        timestamps: TimestampKind::Token,
-        ..Default::default()
-    };
-    let result = match session.run(&pcm, &options) {
-        Ok(result) => result,
-        // Fall back to the family's default granularity if token timestamps
-        // are unsupported; the round-trip is what this test checks.
-        Err(_) => session.run(&pcm, &RunOptions::default()).unwrap(),
-    };
+    let result = session
+        .run(
+            &pcm,
+            &RunOptions {
+                timestamps: caps.max_timestamp_kind,
+                ..Default::default()
+            },
+        )
+        .unwrap();
     assert!(!result.text.is_empty());
+    assert_eq!(result.timestamp_kind, caps.max_timestamp_kind);
+    let rows_present = match result.timestamp_kind {
+        TimestampKind::Token => !result.tokens.is_empty(),
+        TimestampKind::Word => !result.words.is_empty(),
+        TimestampKind::Segment => !result.segments.is_empty(),
+        _ => true,
+    };
+    assert!(
+        rows_present,
+        "no {:?} rows to round-trip",
+        result.timestamp_kind
+    );
 
     assert!(same_transcript(&json_round_trip(&result), &result), "json");
     assert!(
         same_transcript(&postcard_round_trip(&result), &result),
         "postcard"
     );
-    let caps = model.capabilities();
     assert_round_trips(&caps);
     assert_round_trips(&session.limits().unwrap());
 }
