@@ -117,24 +117,6 @@ finish `init_backends()` or `init_backends_default()` before any thread
 enumerates devices, queries backend availability, or loads a model; native
 registry mutation is a startup-only operation and must not race those calls.
 
-## Serialization (`serde`)
-
-The optional `serde` feature derives `Serialize`/`Deserialize` on the
-plain-data option and result types and enums, so requests and results can
-cross a process boundary (e.g. a crash-isolated worker) or be persisted.
-
-```bash
-cargo add transcribe-cpp --features serde
-```
-
-- Handles (`Model`, `Session`, `Stream`, `Device`) and `Error` are not
-  serializable. Send a [device identity](#exact-device-selection) and resolve
-  the `Device` on the other side; map `Error` to your own type.
-- In JSON, missing fields take their `Default`. Binary formats (postcard,
-  bincode) need both sides on the same crate version.
-- A NaN confidence (`Token::p`, `SpeakerSegment::p`) is written to JSON as
-  `null` and read back as NaN; a missing `p` also reads as NaN.
-
 ## Packaging a distributable (`shared` / `dynamic-backends`)
 
 With the **default static** build there is nothing to do — the native code is

@@ -248,17 +248,14 @@ jobs:
             echo "=== example: $ex ==="
             cargo run -p transcribe-cpp --example "$ex" ${{ matrix.features }}
           done
-      - name: Serde feature (round-trip tests)
-        # Pure-Rust derives with no native-build impact, so one leg suffices.
-        # Rides the already-built static posture; the model-tier case runs
-        # here too because linux-static fetches the canary.
+      - name: Serde feature tests
+        # Pure Rust, no model needed; one leg suffices.
         if: matrix.label == 'linux-static'
         run: cargo test -p transcribe-cpp --features serde --test serde
       - name: Clippy (deny warnings)
         # Once is enough; the linux-static leg covers it (clippy on another
         # leg would force a second full native build for no extra lint signal).
-        # Linted with `serde` on so the cfg_attr derives and tests/serde.rs are
-        # covered; the plain build is linted by every leg's compile.
+        # `serde` on so the cfg_attr derives and tests/serde.rs are linted too.
         if: matrix.label == 'linux-static'
         run: cargo clippy --workspace --all-targets --features transcribe-cpp/serde -- -D warnings
       - name: ccache stats
