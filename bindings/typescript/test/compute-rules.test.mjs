@@ -331,6 +331,21 @@ modelTest("session dispose during an in-flight run defers the free; the result s
   }
 });
 
+modelTest("dispose during a run with a signal returns the result and removes the listener", MODEL, async () => {
+  const m = await TranscribeModel.load(MODEL);
+  try {
+    const s = m.createSession();
+    const ac = new AbortController();
+    const p = s.run(jfk(), { signal: ac.signal });
+    await Promise.resolve();
+    s.dispose();
+    assert.match((await p).text, /ask not what your country/i);
+    assert.equal(getEventListeners(ac.signal, "abort").length, 0);
+  } finally {
+    m.dispose();
+  }
+});
+
 modelTest("model dispose during an in-flight run keeps the model alive for the call", MODEL, async () => {
   const m = await TranscribeModel.load(MODEL);
   const s = m.createSession();

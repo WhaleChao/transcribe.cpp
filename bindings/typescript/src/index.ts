@@ -878,9 +878,10 @@ class SessionCore {
       () => flag.aborted,
       n.koffi.pointer(n.abortProto),
     );
-    this.#setAbort(this.handle, cbPtr, null);
+    const h = this.#h; // still valid at cleanup: a mid-run dispose frees behind the lock
+    this.#setAbort(h, cbPtr, null);
     return () => {
-      this.#setAbort(this.handle, null, null);
+      this.#setAbort(h, null, null);
       n.koffi.unregister(cbPtr);
       signal.removeEventListener("abort", onAbort);
     };

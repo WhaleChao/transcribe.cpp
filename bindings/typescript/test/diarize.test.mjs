@@ -145,11 +145,13 @@ modelTest("a diarize run queued before its dispose is rejected as disposed", SOR
 modelTest("dispose during an in-flight diarize run defers the free; the rows survive", SORTFORMER_MODEL, async () => {
   const m = await TranscribeModel.load(SORTFORMER_MODEL);
   const d = m.createDiarizeSession();
-  const p = d.run(mix());
+  const ac = new AbortController();
+  const p = d.run(mix(), { signal: ac.signal });
   await Promise.resolve();
   d.dispose();
   assert.throws(() => d.timings, /run\(\).*in flight/);
   assert.ok((await p).length > 0);
+  assert.equal(getEventListeners(ac.signal, "abort").length, 0);
   assert.throws(() => d.timings, /disposed/);
 
   const d2 = m.createDiarizeSession();
