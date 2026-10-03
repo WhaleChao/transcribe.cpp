@@ -826,6 +826,84 @@ TRANSCRIBE_API transcribe_status transcribe_init_backends(const char * artifact_
 TRANSCRIBE_API transcribe_status transcribe_init_backends_default(void);
 
 /*
+ * Restricting which backends may initialize.
+ *
+ * Registering a GPU backend runs driver code: Vulkan creates an instance
+ * (loading every installed ICD), Metal opens the system device, CUDA
+ * initializes the driver. A broken driver can crash or hang the process
+ * right there, before any model is loaded. A host that isolates inference
+ * in a worker process can recover from that only if the replacement worker
+ * never runs the failing backend's code at all — hiding its devices after
+ * registration is too late.
+ *
+ * transcribe_init_backends_ex() takes an allow-mask of backend kinds. A
+ * backend outside the mask is never registered: its module is never opened
+ * (dynamic-backend builds) and its registration function is never called
+ * (static builds). The CPU backend is always allowed, so a mask of 0 or
+ * TRANSCRIBE_BACKEND_MASK_CPU means "CPU only".
+ *
+ *   CPU     the CPU backend plus host-memory accelerators (BLAS, ZenDNN)
+ *   METAL   Apple Metal
+ *   VULKAN  Vulkan
+ *   CUDA    NVIDIA CUDA
+ *   ROCM    AMD ROCm / HIP
+ *   OTHER   every backend without a dedicated bit in the running library
+ *           (SYCL, OpenCL, RPC, ..., and an out-of-tree module named by
+ *           GGML_BACKEND_PATH)
+ *
+ * The TRANSCRIBE_BACKENDS environment variable can only narrow the mask
+ * further: a comma-separated list of cpu, metal, vulkan, cuda, rocm, other,
+ * all (case-insensitive; e.g. TRANSCRIBE_BACKENDS=cpu forces CPU-only
+ * regardless of what the host passes). Unset or empty means "all". Unknown
+ * names are logged and ignored. It applies to every way backends get
+ * registered, including hosts that never call this function.
+ *
+ * The mask is FIXED the first time the library registers backends — that
+ * is, the first transcribe_init_backends*() call or, in static builds, the
+ * first call that enumerates devices or loads a model. Backends cannot be
+ * unregistered, so a later call asking for a different effective mask
+ * returns TRANSCRIBE_ERR_BACKEND without changing anything. Call this once,
+ * first, per process.
+ */
+#define TRANSCRIBE_BACKEND_MASK_CPU    (1u << 0)
+#define TRANSCRIBE_BACKEND_MASK_METAL  (1u << 1)
+#define TRANSCRIBE_BACKEND_MASK_VULKAN (1u << 2)
+#define TRANSCRIBE_BACKEND_MASK_CUDA   (1u << 3)
+#define TRANSCRIBE_BACKEND_MASK_ROCM   (1u << 4)
+#define TRANSCRIBE_BACKEND_MASK_OTHER  (1u << 31)
+#define TRANSCRIBE_BACKEND_MASK_ALL    0xFFFFFFFFu
+
+struct transcribe_backend_init_params {
+    uint64_t     struct_size;      /* sizeof(*this); set by _init() */
+    const char * artifact_dir;     /* NULL: package-local default, as
+                                      transcribe_init_backends_default() */
+    uint32_t     allowed_backends; /* TRANSCRIBE_BACKEND_MASK_* bits;
+                                      _init() sets ..._MASK_ALL */
+};
+
+TRANSCRIBE_API void transcribe_backend_init_params_init(struct transcribe_backend_init_params * p);
+
+/*
+ * Fix the allowed-backend mask (see above), then load backend modules as
+ * transcribe_init_backends(artifact_dir) or, with artifact_dir NULL,
+ * transcribe_init_backends_default() would. NULL params means all defaults.
+ *
+ * Returns the statuses of those calls, plus:
+ *   TRANSCRIBE_ERR_BAD_STRUCT_SIZE  params fails the struct-size check.
+ *   TRANSCRIBE_ERR_BACKEND          the mask was already fixed to a different
+ *                                   effective value, or no compute device is
+ *                                   registered afterwards.
+ */
+TRANSCRIBE_API transcribe_status transcribe_init_backends_ex(const struct transcribe_backend_init_params * params);
+
+/*
+ * The effective allowed-backend mask: the host's mask (ALL until
+ * transcribe_init_backends_ex() sets one) narrowed by TRANSCRIBE_BACKENDS,
+ * with the CPU bit always set.
+ */
+TRANSCRIBE_API uint32_t transcribe_allowed_backends(void);
+
+/*
  * Opaque process-local compute-device handle. Handles are owned by the
  * runtime, remain valid for the life of the process, and must not be freed.
  * They may be compared for equality but are not persistent identifiers; use

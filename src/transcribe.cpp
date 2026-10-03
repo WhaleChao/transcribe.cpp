@@ -45,12 +45,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <climits>
 #include <cmath>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <filesystem>
@@ -785,6 +787,15 @@ extern "C" void transcribe_device_info_init(struct transcribe_device_info * p) {
     p->struct_size = sizeof(*p);
 }
 
+extern "C" void transcribe_backend_init_params_init(struct transcribe_backend_init_params * p) {
+    if (p == nullptr) {
+        return;
+    }
+    std::memset(p, 0, sizeof(*p));
+    p->struct_size      = sizeof(*p);
+    p->allowed_backends = TRANSCRIBE_BACKEND_MASK_ALL;
+}
+
 extern "C" void transcribe_word_init(struct transcribe_word * p) {
     if (p == nullptr) {
         return;
@@ -891,6 +902,8 @@ constexpr size_t k_min_token_size           = TRANSCRIBE_FIELD_END(transcribe_to
 constexpr size_t k_min_speaker_segment_size = TRANSCRIBE_FIELD_END(transcribe_speaker_segment, p);
 constexpr size_t k_min_timings_size         = TRANSCRIBE_FIELD_END(transcribe_timings, decode_ms);
 constexpr size_t k_min_device_info_size     = TRANSCRIBE_FIELD_END(transcribe_device_info, kind);
+constexpr size_t k_min_backend_init_params_size =
+    TRANSCRIBE_FIELD_END(transcribe_backend_init_params, allowed_backends);
 // k_min_whisper_chunk_trace_size lives in arch/whisper/public.cpp with
 // the chunk-trace accessor that uses it.
 
@@ -1006,6 +1019,142 @@ static std::string path_for_c_api(const std::filesystem::path & path) {
 }
 #endif
 
+// Allowed-backend mask. ggml consults backend_reg_filter (installed at static
+// init, before anything can touch ggml's registry) before registering a
+// compiled-in backend or opening a backend module, so a backend outside the
+// mask never runs any code. The first filter call is the moment backends get
+// registered; from then on the mask is fixed (registrations are permanent).
+static std::atomic<uint32_t> s_host_backend_mask{ TRANSCRIBE_BACKEND_MASK_ALL };
+static std::atomic<bool>     s_backend_mask_fixed{ false };
+static std::mutex            s_backend_mask_mutex;
+
+static bool ascii_iequals(const char * a, const char * b) {
+    for (; *a != '\0' && *b != '\0'; ++a, ++b) {
+        if (std::tolower(static_cast<unsigned char>(*a)) != std::tolower(static_cast<unsigned char>(*b))) {
+            return false;
+        }
+    }
+    return *a == *b;
+}
+
+struct BackendMaskName {
+    const char * name;
+    uint32_t     bit;
+};
+
+// ggml module names (the [lib]ggml-<name> stem) -> mask bit. Anything not
+// listed, including "external" (GGML_BACKEND_PATH), is OTHER.
+static uint32_t module_mask_bit(const char * name) {
+    static const BackendMaskName k_modules[] = {
+        { "cpu",    TRANSCRIBE_BACKEND_MASK_CPU    },
+        { "blas",   TRANSCRIBE_BACKEND_MASK_CPU    },
+        { "zendnn", TRANSCRIBE_BACKEND_MASK_CPU    },
+        { "metal",  TRANSCRIBE_BACKEND_MASK_METAL  },
+        { "vulkan", TRANSCRIBE_BACKEND_MASK_VULKAN },
+        { "cuda",   TRANSCRIBE_BACKEND_MASK_CUDA   },
+        { "hip",    TRANSCRIBE_BACKEND_MASK_ROCM   },
+    };
+    for (const auto & e : k_modules) {
+        if (ascii_iequals(name, e.name)) {
+            return e.bit;
+        }
+    }
+    return TRANSCRIBE_BACKEND_MASK_OTHER;
+}
+
+// TRANSCRIBE_BACKENDS, parsed once. Unset or empty is inert (ALL).
+static uint32_t env_backend_mask() {
+    static const uint32_t mask = [] {
+        static const BackendMaskName k_tokens[] = {
+            { "cpu",    TRANSCRIBE_BACKEND_MASK_CPU    },
+            { "metal",  TRANSCRIBE_BACKEND_MASK_METAL  },
+            { "vulkan", TRANSCRIBE_BACKEND_MASK_VULKAN },
+            { "cuda",   TRANSCRIBE_BACKEND_MASK_CUDA   },
+            { "rocm",   TRANSCRIBE_BACKEND_MASK_ROCM   },
+            { "other",  TRANSCRIBE_BACKEND_MASK_OTHER  },
+            { "all",    TRANSCRIBE_BACKEND_MASK_ALL    },
+        };
+        const char * env = std::getenv("TRANSCRIBE_BACKENDS");
+        if (env == nullptr || env[0] == '\0') {
+            return TRANSCRIBE_BACKEND_MASK_ALL;
+        }
+        uint32_t    m = 0;
+        std::string tok;
+        for (const char * p = env;; ++p) {
+            if (*p != '\0' && *p != ',' && *p != ' ' && *p != '\t') {
+                tok.push_back(*p);
+                continue;
+            }
+            if (!tok.empty()) {
+                uint32_t bit = 0;
+                for (const auto & e : k_tokens) {
+                    if (ascii_iequals(tok.c_str(), e.name)) {
+                        bit = e.bit;
+                    }
+                }
+                if (bit == 0) {
+                    transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
+                                        "TRANSCRIBE_BACKENDS: ignoring unknown backend '%s' "
+                                        "(expected cpu, metal, vulkan, cuda, rocm, other, all)",
+                                        tok.c_str());
+                }
+                m |= bit;
+                tok.clear();
+            }
+            if (*p == '\0') {
+                break;
+            }
+        }
+        return m;
+    }();
+    return mask;
+}
+
+static uint32_t effective_backend_mask(uint32_t host_mask) {
+    return (host_mask & env_backend_mask()) | TRANSCRIBE_BACKEND_MASK_CPU;
+}
+
+// Called by ggml's registry, possibly from inside its function-local static
+// constructor: must not touch the registry, must not throw.
+static bool backend_reg_filter(const char * name) noexcept {
+    try {
+        s_backend_mask_fixed.store(true);
+        const uint32_t bit     = module_mask_bit(name != nullptr ? name : "");
+        const bool     allowed = (effective_backend_mask(s_host_backend_mask.load()) & bit) != 0;
+        if (!allowed) {
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_DEBUG,
+                                "backend '%s' not registered: excluded by allowed-backend mask",
+                                name != nullptr ? name : "(null)");
+        }
+        return allowed;
+    } catch (...) {
+        return false;
+    }
+}
+
+static const bool s_backend_reg_filter_installed = [] {
+    ggml_backend_set_reg_filter(&backend_reg_filter);
+    return true;
+}();
+
+static transcribe_status set_host_backend_mask(uint32_t mask) {
+    std::lock_guard<std::mutex> lock(s_backend_mask_mutex);
+    if (s_backend_mask_fixed.load()) {
+        const uint32_t current = effective_backend_mask(s_host_backend_mask.load());
+        const uint32_t wanted  = effective_backend_mask(mask);
+        if (current != wanted) {
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                                "transcribe_init_backends_ex: allowed-backend mask is already fixed at 0x%08x "
+                                "(backends were registered earlier in this process); cannot change it to 0x%08x",
+                                current, wanted);
+            return TRANSCRIBE_ERR_BACKEND;
+        }
+        return TRANSCRIBE_OK;
+    }
+    s_host_backend_mask.store(mask);
+    return TRANSCRIBE_OK;
+}
+
 static transcribe_status transcribe_init_backends_impl(const char * artifact_dir) {
     ensure_ggml_time_init();
     if (artifact_dir == nullptr || artifact_dir[0] == '\0') {
@@ -1086,6 +1235,36 @@ static transcribe_status transcribe_init_backends_default_impl(void) {
     const auto s = path_for_c_api(dir);
     return transcribe_init_backends(s.c_str());
 #endif
+}
+
+static transcribe_status transcribe_init_backends_ex_impl(const struct transcribe_backend_init_params * params) {
+    ensure_ggml_time_init();
+    struct transcribe_backend_init_params p;
+    transcribe_backend_init_params_init(&p);
+    if (params != nullptr) {
+        if (const auto st = check_input_struct_size(params->struct_size, k_min_backend_init_params_size);
+            st != TRANSCRIBE_OK) {
+            return st;
+        }
+        std::memcpy(&p, params, std::min<uint64_t>(params->struct_size, sizeof(p)));
+    }
+    if (const auto st = set_host_backend_mask(p.allowed_backends); st != TRANSCRIBE_OK) {
+        return st;
+    }
+    const auto st = p.artifact_dir != nullptr ? transcribe_init_backends_impl(p.artifact_dir) :
+                                                transcribe_init_backends_default_impl();
+    if (st != TRANSCRIBE_OK) {
+        return st;
+    }
+    // Static builds register compiled-in backends lazily on first registry
+    // access; force it here so the mask is fixed by this call, as documented.
+    if (ggml_backend_dev_count() == 0) {
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                            "transcribe_init_backends_ex: no compute devices registered (allowed-backend mask 0x%08x)",
+                            effective_backend_mask(s_host_backend_mask.load()));
+        return TRANSCRIBE_ERR_BACKEND;
+    }
+    return TRANSCRIBE_OK;
 }
 
 namespace {
@@ -3318,6 +3497,15 @@ extern "C" transcribe_status transcribe_init_backends(const char * artifact_dir)
 extern "C" transcribe_status transcribe_init_backends_default(void) {
     return api_guard_status("transcribe_init_backends_default",
                             [&] { return transcribe_init_backends_default_impl(); });
+}
+
+extern "C" transcribe_status transcribe_init_backends_ex(const struct transcribe_backend_init_params * params) {
+    return api_guard_status("transcribe_init_backends_ex", [&] { return transcribe_init_backends_ex_impl(params); });
+}
+
+extern "C" uint32_t transcribe_allowed_backends(void) {
+    return api_guard_value("transcribe_allowed_backends", static_cast<uint32_t>(TRANSCRIBE_BACKEND_MASK_CPU),
+                           [&] { return effective_backend_mask(s_host_backend_mask.load()); });
 }
 
 extern "C" int transcribe_device_count(void) {
