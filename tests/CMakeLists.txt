@@ -353,6 +353,23 @@ add_test(NAME transcribe_run_on_threads_unit
     COMMAND transcribe_run_on_threads_unit)
 
 # -----------------------------------------------------------------------------
+# Non-finite PCM rejection on every ASR entry point
+# -----------------------------------------------------------------------------
+
+add_executable(transcribe_nonfinite_input_unit
+    nonfinite_input_unit.cpp)
+
+target_link_libraries(transcribe_nonfinite_input_unit PRIVATE transcribe)
+
+target_include_directories(transcribe_nonfinite_input_unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
+
+transcribe_apply_warnings(transcribe_nonfinite_input_unit)
+
+add_test(NAME transcribe_nonfinite_input_unit
+    COMMAND transcribe_nonfinite_input_unit)
+
+# -----------------------------------------------------------------------------
 # Dispatcher-level streaming entry-point behavior
 # -----------------------------------------------------------------------------
 

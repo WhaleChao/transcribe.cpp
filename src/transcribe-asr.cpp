@@ -49,6 +49,7 @@ using transcribe::api_guard_status;
 using transcribe::api_guard_value;
 using transcribe::api_guard_void;
 using transcribe::enum_field_raw;
+using transcribe::pcm_is_finite;
 
 namespace {
 
@@ -1178,6 +1179,10 @@ static transcribe_status transcribe_stream_feed_impl(struct transcribe_session *
     if (session->stream_state != TRANSCRIBE_STREAM_ACTIVE) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
+    // Rejected before the hook, so the stream stays ACTIVE and usable.
+    if (!pcm_is_finite(pcm, n_samples)) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
     // begin already confirmed model/arch/hook; we re-check defensively
     // so a malformed context (never happens in practice from a real
     // begin) does not deref a null function pointer.
@@ -1387,6 +1392,9 @@ static transcribe_status run_one_inner(struct transcribe_session *          sess
     if (n_samples <= 0) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
+    if (!pcm_is_finite(pcm, n_samples)) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
     // NULL params means "all defaults" (transcribe vs translate, no
     // timestamps, etc.). A well-formed default run is not a malformed
     // call, so it proceeds and replaces the previous result.
@@ -1524,6 +1532,11 @@ static transcribe_status transcribe_run_impl(struct transcribe_session *        
     // call must not touch the session at all — the API smoke test probes
     // this with a fake (session *)0x1 and a NULL pcm / non-positive
     // n_samples, expecting INVALID_ARG with no dereference.
+    // Non-finite PCM is malformed too: reject it here, before batch_results
+    // is touched (run_one_inner repeats the check for the batch fallback).
+    if (pcm != nullptr && n_samples > 0 && !pcm_is_finite(pcm, n_samples)) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
     if (session != nullptr && pcm != nullptr && n_samples > 0) {
         session->batch_results.clear();
     }
@@ -1588,6 +1601,16 @@ static transcribe_status transcribe_run_batch_impl(struct transcribe_session *  
     // mutate the session, so a malformed call preserves the prior result.
     if (session == nullptr || pcm == nullptr || n_samples == nullptr || n <= 0) {
         return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    // Non-finite samples in any utterance reject the whole batch here, before
+    // anything is cleared (unlike a NULL / empty utterance, which is a
+    // per-utterance failure): the families' batched hooks never see them.
+    for (int i = 0; i < n; ++i) {
+        if (pcm[i] != nullptr && n_samples[i] > 0 && !pcm_is_finite(pcm[i], n_samples[i])) {
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                                "transcribe_run_batch: utterance %d has non-finite samples (NaN / Inf)", i);
+            return TRANSCRIBE_ERR_INVALID_ARG;
+        }
     }
     struct transcribe_run_params params_defaults;
     transcribe_run_params_init(&params_defaults);

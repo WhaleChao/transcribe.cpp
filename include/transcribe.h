@@ -1562,7 +1562,10 @@ TRANSCRIBE_API const struct transcribe_model * transcribe_get_model(const struct
 /*
  * Run one batch transcription.
  *
- * pcm:        mono float32 PCM samples in [-1.0, 1.0] at 16 kHz.
+ * pcm:        mono float32 PCM samples in [-1.0, 1.0] at 16 kHz. Every
+ *             sample must be finite: NaN or +-Inf returns
+ *             TRANSCRIBE_ERR_INVALID_ARG and leaves the previous result
+ *             in place. Silence is valid.
  * n_samples:  number of samples in pcm. Must be strictly positive;
  *             a non-positive count returns TRANSCRIBE_ERR_INVALID_ARG
  *             (same rule as transcribe_stream_feed).
@@ -1641,7 +1644,10 @@ TRANSCRIBE_API transcribe_status transcribe_run(struct transcribe_session *     
  *                                  or n_samples[i] <= 0) fails only that
  *                                  utterance and is reported there.
  *   TRANSCRIBE_ERR_INVALID_ARG     session / pcm / n_samples NULL, n <= 0,
- *                                  or the session is in an ACTIVE stream.
+ *                                  any utterance holds a non-finite sample
+ *                                  (NaN / +-Inf; the previous result is
+ *                                  preserved), or the session is in an
+ *                                  ACTIVE stream.
  *   TRANSCRIBE_ERR_BAD_STRUCT_SIZE params->struct_size below the minimum.
  *   TRANSCRIBE_ERR_NOT_IMPLEMENTED the model has no run path at all.
  *   ... plus the same shared-param rejections as transcribe_run
@@ -2181,8 +2187,10 @@ TRANSCRIBE_API transcribe_status transcribe_stream_begin(struct transcribe_sessi
  * Feed PCM into the active stream. 16 kHz mono float32, same as
  * transcribe_run.
  *
- * pcm must be non-null and n_samples must be strictly greater than
- * zero. Polling the stream without supplying audio is unsupported —
+ * pcm must be non-null, n_samples must be strictly greater than zero,
+ * and every sample must be finite (NaN / +-Inf returns
+ * TRANSCRIBE_ERR_INVALID_ARG and the stream stays ACTIVE, unchanged).
+ * Polling the stream without supplying audio is unsupported —
  * use the stream accessors (transcribe_stream_revision,
  * transcribe_stream_get_text, transcribe_stream_n_committed_*,
  * transcribe_stream_last_status, transcribe_stream_get_state) to inspect

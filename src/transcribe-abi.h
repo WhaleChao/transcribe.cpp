@@ -9,6 +9,7 @@
 
 #include "transcribe.h"
 
+#include <cmath>
 #include <cstddef>
 #include <cstring>
 
@@ -30,6 +31,20 @@ inline int enum_field_raw(const void * field) {
 
 static_assert(sizeof(transcribe_backend_request) == sizeof(int),
               "public enums must be int-sized for raw boundary reads");
+
+// Every PCM entry point rejects non-finite samples (NaN / +-Inf) with
+// TRANSCRIBE_ERR_INVALID_ARG before it modifies any result or stream state:
+// a NaN would otherwise flow through the front end and come out as a
+// confident-looking result. Silence is valid input. O(n), negligible next to
+// any encoder.
+inline bool pcm_is_finite(const float * pcm, int n_samples) {
+    for (int i = 0; i < n_samples; ++i) {
+        if (!std::isfinite(pcm[i])) {
+            return false;
+        }
+    }
+    return true;
+}
 
 // Strict size check for every caller-owned struct (inputs AND outputs):
 // struct_size smaller than the prefix the library relies on is rejected.
