@@ -319,6 +319,23 @@ add_test(NAME transcribe_run_dispatch_unit
     COMMAND transcribe_run_dispatch_unit)
 
 # -----------------------------------------------------------------------------
+# Load-time role validation
+# -----------------------------------------------------------------------------
+
+add_executable(transcribe_role_resolve_unit
+    role_resolve_unit.cpp)
+
+target_link_libraries(transcribe_role_resolve_unit PRIVATE transcribe)
+
+target_include_directories(transcribe_role_resolve_unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
+
+transcribe_apply_warnings(transcribe_role_resolve_unit)
+
+add_test(NAME transcribe_role_resolve_unit
+    COMMAND transcribe_role_resolve_unit)
+
+# -----------------------------------------------------------------------------
 # Dispatcher-level streaming entry-point behavior
 # -----------------------------------------------------------------------------
 

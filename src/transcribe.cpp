@@ -846,7 +846,11 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
     // to the whisper .bin adapter, which validates the hparams as
     // whisper-shaped (rejecting unrelated ggml-magic files like Silero VAD).
     if (magic == 0x67676d6cu) {
-        return transcribe::whisper::load_from_bin(path, params, out_model);
+        const transcribe_status st = transcribe::whisper::load_from_bin(path, params, out_model);
+        if (st != TRANSCRIBE_OK || *out_model == nullptr) {
+            return st;
+        }
+        return transcribe::resolve_roles(*out_model);
     }
 
     // Header-only GGUF inspection. The Loader is stack-allocated; if
@@ -881,10 +885,15 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
     // here instead of in every per-family handler. `variant` is owned by the
     // family (it may default it when stt.variant was absent) and stays on its
     // own accessor; this map is the generic general.* / display surface.
-    if (st == TRANSCRIBE_OK && out_model != nullptr && *out_model != nullptr) {
-        (*out_model)->meta = loader.meta();
+    if (st != TRANSCRIBE_OK || *out_model == nullptr) {
+        return st;
     }
-    return st;
+    (*out_model)->meta = loader.meta();
+
+    // Role bits are validated against the arch here, for every family, so a
+    // model never reaches the caller with a role it cannot serve. On failure
+    // the forwarder frees the model.
+    return transcribe::resolve_roles(*out_model);
 }
 
 static void transcribe_model_free_impl(struct transcribe_model * model) {
