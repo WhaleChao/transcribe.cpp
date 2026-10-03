@@ -13,9 +13,9 @@ Shipped matrix: **F32 + F16 + Q8_0** (k tiers withdrawn; see "Quant policy
 `handy-computer/diar_streaming_sortformer_4spk-v2.1-gguf`.
 
 Batch posture: **ACCEPTED GAP — no `run_batch()`** (user-approved Stage 4
-deferral; single-session `transcribe_run` is the shipped path; revisit with
+deferral; single-session `transcribe_diarize_run` is the shipped path; revisit with
 multitalker interop). Streaming posture: **natively streaming — PASS**; the
-chunk/lookahead contract is the preset menu in "Public API (run extension)"
+chunk/lookahead contract is the preset menu in "Public API (diarize extension)"
 (default = GGUF-shipped checkpoint cfg; very_high_latency ~30.4 s lookahead
 ... low_latency ~1.04 s), exposed via `transcribe_sortformer_diarize_ext`.
 Push-audio `transcribe_stream_*` entry point is future work (STREAM-slot
@@ -57,8 +57,7 @@ verbatim). A diarizer meeting neither clause (e.g. a pyannote
 segmentation+clustering port: new architecture, new dependency surface, no
 in-repo ASR consumer) is out of scope. Standalone diarization output is
 exposed because it falls out of the multitalker dependency for free, via
-the pre-existing transcript-independent `transcribe_speaker_segment` ABI —
-no diarizer-specific output surface was added.
+the DIARIZE role (`include/transcribe/diarize.h`).
 
 ## Public API (diarize extension)
 

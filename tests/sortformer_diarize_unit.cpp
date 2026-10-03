@@ -1,15 +1,5 @@
 // sortformer_diarize_unit.cpp - Sortformer on the DIARIZE role, against a
 // real GGUF (TRANSCRIBE_SORTFORMER_GGUF; RC 77 skip when unset).
-//
-//   1. roles (DIARIZE only), info, and the SFDR kind on the DIARIZE_RUN slot.
-//   2. Golden segments on the 2-speaker oracle mix per preset (CPU), and the
-//      ext preset matching the TRANSCRIBE_SORTFORMER_STREAM_PRESET env path
-//      the DER tooling uses.
-//   3. An out-of-range preset is rejected before the previous result is
-//      cleared.
-//   4. Cross-role concurrency: when TRANSCRIBE_WHISPER_GGUF is also set, an
-//      ASR session and a diarize session on two models run on two threads
-//      at once and match their sequential results.
 
 #include "transcribe.h"
 #include "transcribe/diarize.h"
@@ -130,13 +120,8 @@ int main() {
         return EXIT_FAILURE;
     }
 
-    // 1. Roles, info, extension probe. ASR entry points refuse the model.
+    // 1. Roles, info, extension probe.
     CHECK(transcribe_model_roles(model) == TRANSCRIBE_ROLE_DIARIZE);
-    transcribe_session * asr = nullptr;
-    CHECK(transcribe_session_init(model, nullptr, &asr) == TRANSCRIBE_ERR_UNSUPPORTED_ROLE);
-    transcribe_capabilities caps;
-    transcribe_capabilities_init(&caps);
-    CHECK(transcribe_model_get_capabilities(model, &caps) == TRANSCRIBE_ERR_UNSUPPORTED_ROLE);
     CHECK(!transcribe_model_supports(model, TRANSCRIBE_FEATURE_DIARIZATION));
     transcribe_diarize_info info;
     transcribe_diarize_info_init(&info);

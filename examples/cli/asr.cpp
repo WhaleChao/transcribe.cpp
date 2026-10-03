@@ -10,23 +10,63 @@
 #include "wav.h"
 
 #include <algorithm>
-#include <cctype>
-#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
-#include <iterator>
 #include <string>
 #include <vector>
 
 using transcribe_cli::cli_args;
-using transcribe_cli::json_escape;
-using transcribe_cli::write_output_file;
 
 namespace {
+
+// Minimal JSON string escape: covers the characters MUST be escaped by
+// the JSON spec (quote, backslash, control chars). Transcribed text is
+// short UTF-8 in practice; we don't need unicode escaping.
+std::string json_escape(const char * s) {
+    std::string out;
+    for (const char * p = s ? s : ""; *p; ++p) {
+        const unsigned char c = static_cast<unsigned char>(*p);
+        if (c == '"') {
+            out += "\\\"";
+        } else if (c == '\\') {
+            out += "\\\\";
+        } else if (c == '\n') {
+            out += "\\n";
+        } else if (c == '\r') {
+            out += "\\r";
+        } else if (c == '\t') {
+            out += "\\t";
+        } else if (c < 0x20) {
+            char buf[8];
+            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+            out += buf;
+        } else {
+            out += static_cast<char>(c);
+        }
+    }
+    return out;
+}
+
+bool write_output_file(std::ofstream * output, const std::string & path, const char * text) {
+    if (output == nullptr) {
+        return true;
+    }
+    const char * value = text != nullptr ? text : "";
+    *output << value;
+    if (value[0] == '\0' || value[std::strlen(value) - 1] != '\n') {
+        *output << '\n';
+    }
+    output->flush();
+    if (!*output) {
+        std::fprintf(stderr, "error: cannot write %s\n", path.c_str());
+        return false;
+    }
+    return true;
+}
 
 // Shared row formatter for segments_json / batch_segments_json below.
 std::string segment_row_json(const struct transcribe_segment & seg) {
@@ -614,7 +654,6 @@ int run_asr_batch(const cli_args & args, std::ofstream * output) {
 
 int run_asr_file(const cli_args & args, std::ofstream * output) {
     bool               output_ok = true;
-    // Single-file mode.
     std::vector<float> pcm;
     std::string        load_err;
     if (!transcribe_cli::load_wav_mono_16k(args.wav_path, pcm, load_err)) {
@@ -652,7 +691,7 @@ int run_asr_file(const cli_args & args, std::ofstream * output) {
         }
 
         const uint32_t roles = transcribe_model_roles(model);
-        if (args.role == "diarize" || (args.role.empty() && (roles & TRANSCRIBE_ROLE_ASR) == 0)) {
+        if ((roles & TRANSCRIBE_ROLE_ASR) == 0) {
             return transcribe_cli::run_diarize_file(args, model, pcm, duration_s);
         }
 

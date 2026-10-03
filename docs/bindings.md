@@ -110,7 +110,7 @@ from `model.diarize_session()` (Python, Rust), `model.diarizeSession()`
 (Swift) or `model.createDiarizeSession()` (TypeScript), plus `diarize_info` /
 `diarizeInfo` (sample rate, max speakers). `run(pcm, …)` returns copied-out
 speaker-turn rows (the same row type as above) and takes the family's
-diarize extension (Sortformer: the preset on the `diarize_run` slot).
+diarize extension (Sortformer: the preset on the DIARIZE_RUN slot).
 
 A diarize run follows the same execution rules as an ASR run: it holds the
 model-wide compute lock, waits behind other compute on the model, raises

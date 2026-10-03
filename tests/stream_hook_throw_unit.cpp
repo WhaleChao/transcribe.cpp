@@ -1,8 +1,7 @@
 // stream_hook_throw_unit.cpp - a family stream hook that throws ends the
 // stream: begin / feed / finalize leave it FAILED with last_status matching
 // the status the call returned (OOM for bad_alloc, BACKEND otherwise), and
-// reset still ends IDLE. Before, a throwing hook left the stream ACTIVE
-// while the caller got an error.
+// reset still ends IDLE.
 
 #include "transcribe-arch.h"
 #include "transcribe-model.h"
@@ -95,7 +94,8 @@ struct Fixture {
     }
 };
 
-void expect_failed(const transcribe_session & s, transcribe_status st, transcribe_status want) {
+void expect_failed(const transcribe_session & s, transcribe_status st, Throw t) {
+    const transcribe_status want = t == Throw::BadAlloc ? TRANSCRIBE_ERR_OOM : TRANSCRIBE_ERR_BACKEND;
     CHECK(st == want);
     CHECK(transcribe_stream_get_state(&s) == TRANSCRIBE_STREAM_FAILED);
     CHECK(transcribe_stream_last_status(&s) == want);
@@ -107,7 +107,7 @@ void test_begin_throw() {
         Fixture f;
         g_begin                    = t;
         const transcribe_status st = transcribe_stream_begin(&f.session, nullptr, nullptr);
-        expect_failed(f.session, st, t == Throw::BadAlloc ? TRANSCRIBE_ERR_OOM : TRANSCRIBE_ERR_BACKEND);
+        expect_failed(f.session, st, t);
         // A failed stream accepts a fresh begin.
         g_begin = Throw::None;
         CHECK(transcribe_stream_begin(&f.session, nullptr, nullptr) == TRANSCRIBE_OK);
@@ -121,7 +121,7 @@ void test_feed_throw() {
         Fixture f;
         CHECK(transcribe_stream_begin(&f.session, nullptr, nullptr) == TRANSCRIBE_OK);
         g_feed = t;
-        expect_failed(f.session, f.feed(), t == Throw::BadAlloc ? TRANSCRIBE_ERR_OOM : TRANSCRIBE_ERR_BACKEND);
+        expect_failed(f.session, f.feed(), t);
         // No longer ACTIVE, so further feeds are refused as on any failed stream.
         g_feed = Throw::None;
         CHECK(f.feed() == TRANSCRIBE_ERR_INVALID_ARG);
@@ -136,7 +136,7 @@ void test_finalize_throw() {
         CHECK(f.feed() == TRANSCRIBE_OK);
         g_finalize                 = t;
         const transcribe_status st = transcribe_stream_finalize(&f.session, nullptr);
-        expect_failed(f.session, st, t == Throw::BadAlloc ? TRANSCRIBE_ERR_OOM : TRANSCRIBE_ERR_BACKEND);
+        expect_failed(f.session, st, t);
     }
 }
 

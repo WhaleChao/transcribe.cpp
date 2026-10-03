@@ -525,9 +525,10 @@ static void test_model_introspection_null(void) {
           false);
     CHECK(transcribe_model_accepts_ext_kind(NULL, TRANSCRIBE_EXT_SLOT_RUN, TRANSCRIBE_EXT_KIND_WHISPER_RUN) == false);
 
+    CHECK(transcribe_model_roles(NULL) == 0);
+
     /* The feature probe is also NULL-safe and returns false for every
      * known feature value plus any out-of-range enum. */
-    CHECK(transcribe_model_roles(NULL) == 0);
     CHECK(transcribe_model_supports(NULL, TRANSCRIBE_FEATURE_INITIAL_PROMPT) == false);
     CHECK(transcribe_model_supports(NULL, TRANSCRIBE_FEATURE_TEMPERATURE_FALLBACK) == false);
     CHECK(transcribe_model_supports(NULL, TRANSCRIBE_FEATURE_LONG_FORM) == false);

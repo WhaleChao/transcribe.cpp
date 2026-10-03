@@ -319,89 +319,17 @@ add_test(NAME transcribe_run_dispatch_unit
     COMMAND transcribe_run_dispatch_unit)
 
 # -----------------------------------------------------------------------------
-# Load-time role validation
+# Dispatcher units against fake arches: roles, host thread pool, non-finite
+# input, throwing stream hooks, DIARIZE role
 # -----------------------------------------------------------------------------
 
-add_executable(transcribe_role_resolve_unit
-    role_resolve_unit.cpp)
-
-target_link_libraries(transcribe_role_resolve_unit PRIVATE transcribe)
-
-target_include_directories(transcribe_role_resolve_unit PRIVATE
-    ${CMAKE_SOURCE_DIR}/src)
-
-transcribe_apply_warnings(transcribe_role_resolve_unit)
-
-add_test(NAME transcribe_role_resolve_unit
-    COMMAND transcribe_role_resolve_unit)
-
-# -----------------------------------------------------------------------------
-# Host thread pool: join on every path, exceptions reach the caller
-# -----------------------------------------------------------------------------
-
-add_executable(transcribe_run_on_threads_unit
-    run_on_threads_unit.cpp)
-
-target_link_libraries(transcribe_run_on_threads_unit PRIVATE transcribe)
-
-target_include_directories(transcribe_run_on_threads_unit PRIVATE
-    ${CMAKE_SOURCE_DIR}/src)
-
-transcribe_apply_warnings(transcribe_run_on_threads_unit)
-
-add_test(NAME transcribe_run_on_threads_unit
-    COMMAND transcribe_run_on_threads_unit)
-
-# -----------------------------------------------------------------------------
-# Non-finite PCM rejection on every ASR entry point
-# -----------------------------------------------------------------------------
-
-add_executable(transcribe_nonfinite_input_unit
-    nonfinite_input_unit.cpp)
-
-target_link_libraries(transcribe_nonfinite_input_unit PRIVATE transcribe)
-
-target_include_directories(transcribe_nonfinite_input_unit PRIVATE
-    ${CMAKE_SOURCE_DIR}/src)
-
-transcribe_apply_warnings(transcribe_nonfinite_input_unit)
-
-add_test(NAME transcribe_nonfinite_input_unit
-    COMMAND transcribe_nonfinite_input_unit)
-
-# -----------------------------------------------------------------------------
-# A throwing stream hook ends the stream (FAILED, or IDLE for reset)
-# -----------------------------------------------------------------------------
-
-add_executable(transcribe_stream_hook_throw_unit
-    stream_hook_throw_unit.cpp)
-
-target_link_libraries(transcribe_stream_hook_throw_unit PRIVATE transcribe)
-
-target_include_directories(transcribe_stream_hook_throw_unit PRIVATE
-    ${CMAKE_SOURCE_DIR}/src)
-
-transcribe_apply_warnings(transcribe_stream_hook_throw_unit)
-
-add_test(NAME transcribe_stream_hook_throw_unit
-    COMMAND transcribe_stream_hook_throw_unit)
-
-# -----------------------------------------------------------------------------
-# DIARIZE role dispatcher (fake arch)
-# -----------------------------------------------------------------------------
-
-add_executable(transcribe_diarize_dispatch_unit
-    diarize_dispatch_unit.cpp)
-
-target_link_libraries(transcribe_diarize_dispatch_unit PRIVATE transcribe)
-
-target_include_directories(transcribe_diarize_dispatch_unit PRIVATE
-    ${CMAKE_SOURCE_DIR}/src)
-
-transcribe_apply_warnings(transcribe_diarize_dispatch_unit)
-
-add_test(NAME transcribe_diarize_dispatch_unit
-    COMMAND transcribe_diarize_dispatch_unit)
+foreach(_t role_resolve run_on_threads nonfinite_input stream_hook_throw diarize_dispatch)
+    add_executable(transcribe_${_t}_unit ${_t}_unit.cpp)
+    target_link_libraries(transcribe_${_t}_unit PRIVATE transcribe)
+    target_include_directories(transcribe_${_t}_unit PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    transcribe_apply_warnings(transcribe_${_t}_unit)
+    add_test(NAME transcribe_${_t}_unit COMMAND transcribe_${_t}_unit)
+endforeach()
 
 # -----------------------------------------------------------------------------
 # Dispatcher-level streaming entry-point behavior

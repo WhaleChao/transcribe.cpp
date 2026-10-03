@@ -1,6 +1,6 @@
 // run_on_threads_unit.cpp - transcribe::run_on_threads joins every launched
 // thread on every path and hands worker / launch exceptions to the caller
-// instead of calling std::terminate (H5).
+// instead of calling std::terminate.
 
 #include "transcribe-batch-util.h"
 

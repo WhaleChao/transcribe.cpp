@@ -22,9 +22,8 @@ them, and `transcribe_session_init` / `transcribe_open` return
 | `transcribe-cli --batch ... --batch-jsonl` "speakers" for Sortformer | `transcribe-cli -m sortformer.gguf audio.wav` prints the segments |
 
 Segments are byte-identical to 0.3 for the same audio, preset and backend.
-ASR models that attribute speakers inside a transcript (granite, moss,
-multitalker parakeet) are unchanged: they keep `run_params.diarize`,
-`TRANSCRIBE_FEATURE_DIARIZATION` and the ASR speaker accessors.
+Speaker-attributing ASR models (granite, moss, multitalker parakeet) are
+unchanged; see `docs/roles.md`.
 
 ## Capabilities are ASR-only
 
@@ -47,12 +46,10 @@ from the role's own query (`transcribe_diarize_get_info`).
 
 ## Language bindings
 
-- New error type for status 20: `UnsupportedRole` (Python, TypeScript,
-  Rust), `.unsupportedRole` (Swift).
-- Each binding gains `Model.roles` and a `DiarizeSession` (see
-  `docs/bindings.md`). The Sortformer run extension for the ASR path
-  (`SortformerStreamOptions` and its equivalents) is replaced by the diarize
-  one.
+- New `Model.roles`, `DiarizeSession` and an `UnsupportedRole` error for
+  status 20 (`.unsupportedRole` in Swift); see `docs/bindings.md`. The
+  Sortformer ASR-path extension (`SortformerStreamOptions` and equivalents)
+  is removed.
 - **Rust:** `Model::capabilities()` returns `Result<Capabilities>`
   (`Err(Error::UnsupportedRole)` on a model without ASR), and `ExtSlot`
   gains `DiarizeRun`.

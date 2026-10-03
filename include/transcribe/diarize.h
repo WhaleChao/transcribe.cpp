@@ -6,12 +6,8 @@
  * TRANSCRIBE_ROLE_DIARIZE). ASR models that attribute speakers inside a
  * transcript keep using transcribe_run_params::diarize instead.
  *
- * Shape: load a model with transcribe_model_load_file, open a
- * transcribe_diarize_session on it, run, then read the speaker segments.
- * Sessions follow the transcribe_session threading contract in
- * transcribe.h: one thread at a time per session, the model outlives its
- * sessions, and at most one compute in flight per model across every
- * session of every role.
+ * Open a transcribe_diarize_session on a loaded model, run, then read the
+ * speaker segments. Threading and lifetime rules: docs/roles.md.
  */
 
 #ifndef TRANSCRIBE_DIARIZE_H

@@ -12,14 +12,11 @@ A loaded model serves one or more **roles**, the kinds of work it can do.
 
 Every role follows the same rules:
 
-- **One model, any role.** Load with `transcribe_model_load_file` and pick
-  the backend per model with `transcribe_model_load_params`. Running a
-  diarizer on CPU and ASR on the GPU is two loads.
+- **One load per model**, with its own backend (`transcribe_model_load_params`).
 - **Sessions.** Each role has its own session type created from a model.
   A session is used by one thread at a time; the model outlives its
   sessions; at most one compute is in flight per model across all sessions
   of all roles. Different models compute in parallel.
-- **Composition is by handle**, never by path in params.
 - **Input.** 16 kHz mono float32 PCM; NaN / Inf is `INVALID_ARG`.
 - **Results** are copied out and replaced by the next run; malformed input
   is rejected before the previous result is touched.

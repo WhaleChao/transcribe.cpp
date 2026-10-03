@@ -6,17 +6,9 @@
 // Run with --help for the full option list.
 
 #include "cli.h"
-#include "transcribe.h"
-#include "transcribe/parakeet.h"
-#include "transcribe/voxtral_realtime.h"
-#include "transcribe/whisper.h"
-#include "wav.h"
 
-#include <algorithm>
 #include <cctype>
 #include <charconv>
-#include <cmath>
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -114,8 +106,6 @@ void print_usage(const char * argv0) {
                  "                        supports_spec_decode. -1 = family default,\n"
                  "                        0 = off, > 0 = explicit K. Silently ignored\n"
                  "                        by families without spec support.\n"
-                 "  --role ROLE           asr or diarize, for a model serving both\n"
-                 "                        (default: asr when available)\n"
                  "  --list-devices        list registered compute devices (with memory)\n"
                  "                        and exit; ignores all other options\n"
                  "  -h, --help            show this help\n",
@@ -489,16 +479,6 @@ bool parse_args(int argc, char ** argv, cli_args & out) {
                 std::fprintf(stderr, "error: --spec-k-drafts must be -1 (family default), 0 (off), or > 0\n");
                 return false;
             }
-        } else if (a == "--role") {
-            const char * v = take_value(a.c_str());
-            if (!v) {
-                return false;
-            }
-            out.role = v;
-            if (out.role != "asr" && out.role != "diarize") {
-                std::fprintf(stderr, "error: --role must be asr or diarize\n");
-                return false;
-            }
         } else if (!a.empty() && a[0] == '-') {
             std::fprintf(stderr, "error: unknown option '%s'\n", a.c_str());
             return false;
@@ -561,55 +541,6 @@ void log_cb(transcribe_log_level level, const char * msg, void * userdata) {
 
 }  // namespace
 
-namespace transcribe_cli {
-
-// Minimal JSON string escape: covers the characters MUST be escaped by
-// the JSON spec (quote, backslash, control chars). Transcribed text is
-// short UTF-8 in practice; we don't need unicode escaping.
-std::string json_escape(const char * s) {
-    std::string out;
-    for (const char * p = s ? s : ""; *p; ++p) {
-        const unsigned char c = static_cast<unsigned char>(*p);
-        if (c == '"') {
-            out += "\\\"";
-        } else if (c == '\\') {
-            out += "\\\\";
-        } else if (c == '\n') {
-            out += "\\n";
-        } else if (c == '\r') {
-            out += "\\r";
-        } else if (c == '\t') {
-            out += "\\t";
-        } else if (c < 0x20) {
-            char buf[8];
-            std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-            out += buf;
-        } else {
-            out += static_cast<char>(c);
-        }
-    }
-    return out;
-}
-
-bool write_output_file(std::ofstream * output, const std::string & path, const char * text) {
-    if (output == nullptr) {
-        return true;
-    }
-    const char * value = text != nullptr ? text : "";
-    *output << value;
-    if (value[0] == '\0' || value[std::strlen(value) - 1] != '\n') {
-        *output << '\n';
-    }
-    output->flush();
-    if (!*output) {
-        std::fprintf(stderr, "error: cannot write %s\n", path.c_str());
-        return false;
-    }
-    return true;
-}
-
-}  // namespace transcribe_cli
-
 int main(int argc, char ** argv) {
     cli_args args;
     if (!parse_args(argc, argv, args)) {
@@ -644,10 +575,6 @@ int main(int argc, char ** argv) {
         output = &output_file;
     }
 
-    // Batch mode: --batch reads a file list, one wav path per line. Loads
-    // the model ONCE and reuses the context across all files. Outputs one
-    // JSONL line per file to stdout when --batch-jsonl is set, otherwise
-    // the same human-readable format as single-file mode.
     if (!args.batch_file.empty()) {
         return transcribe_cli::run_asr_batch(args, output);
     }

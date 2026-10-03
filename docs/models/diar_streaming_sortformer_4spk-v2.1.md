@@ -151,8 +151,8 @@ full 39-minute AMI meeting (87 compression calls).
 - **`LOW_LATENCY` is compute-heavy on CPU** (~1.2x realtime on Apple M4;
   the 0.5 s chunks rebuild the compute graph often). Use Metal or a
   higher-latency preset for offline files.
-- **No batch fast path** (`run_batch`); multi-file CLI batches run
-  serially.
+- **No batch mode**: run one file per call (`transcribe-cli --batch` is
+  ASR-only).
 
 ## Reproduction
 
