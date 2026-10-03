@@ -23,6 +23,7 @@ ALL_OPTION_TYPES = [
     t.ParakeetStreamOptions,
     t.ParakeetBufferedStreamOptions,
     t.SortformerStreamOptions,
+    t.SortformerDiarizeOptions,
     t.VoxtralRealtimeStreamOptions,
 ]
 
@@ -35,7 +36,7 @@ def test_build_stamps_kind_and_size(cls):
     ext = cls()._build()
     assert ext.ext.kind == cls._kind
     assert ext.ext.size == ctypes.sizeof(cls._struct)
-    assert cls._slot in ("run", "stream")
+    assert cls._slot in t._EXT_SLOTS
 
 
 @pytest.mark.parametrize("cls", ALL_OPTION_TYPES)
@@ -85,6 +86,14 @@ def test_sortformer_preset_maps_to_enum_value():
 def test_sortformer_unknown_preset_rejected():
     with pytest.raises(ValueError, match="preset"):
         t.SortformerStreamOptions(preset="ultra_low_latency")  # type: ignore[arg-type]
+
+
+def test_sortformer_diarize_preset_maps_to_enum_value():
+    built = t.SortformerDiarizeOptions(preset="low_latency")._build()
+    assert built.preset == _generated.TRANSCRIBE_SORTFORMER_PRESET_LOW_LATENCY
+    default = t.SortformerDiarizeOptions()._build()
+    assert default.preset == _generated.TRANSCRIBE_SORTFORMER_PRESET_DEFAULT
+    assert not isinstance(t.SortformerDiarizeOptions(), t.SortformerStreamOptions)
 
 
 # --- model-gated: resolve_family validation + a real extension run ----------

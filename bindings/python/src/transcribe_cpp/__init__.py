@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import collections
 import ctypes
+import enum
 import os
 import threading
 import weakref
@@ -77,6 +78,9 @@ __all__ = [
     "transcribe",
     "Model",
     "Session",
+    "DiarizeSession",
+    "DiarizeInfo",
+    "Role",
     "Result",
     "Segment",
     "SpeakerSegment",
@@ -94,6 +98,7 @@ __all__ = [
     "ParakeetStreamOptions",
     "ParakeetBufferedStreamOptions",
     "SortformerStreamOptions",
+    "SortformerDiarizeOptions",
     "VoxtralRealtimeStreamOptions",
     "Backend",
     "SortformerPreset",
@@ -252,6 +257,7 @@ _STREAM_STATES = {
 _EXT_SLOTS = {
     "run": _generated.TRANSCRIBE_EXT_SLOT_RUN,
     "stream": _generated.TRANSCRIBE_EXT_SLOT_STREAM,
+    "diarize_run": _generated.TRANSCRIBE_EXT_SLOT_DIARIZE_RUN,
 }
 _FEATURES = {
     "initial_prompt": _generated.TRANSCRIBE_FEATURE_INITIAL_PROMPT,
@@ -554,6 +560,20 @@ class Capabilities:
     supports_spec_decode: bool
     max_audio_ms: int
     translate_target_languages: tuple[str, ...]
+
+
+class Role(enum.Enum):
+    """What a model serves (``Model.roles``): ASR is ``Model.session()``,
+    DIARIZE is ``Model.diarize_session()``."""
+
+    ASR = _generated.TRANSCRIBE_ROLE_ASR
+    DIARIZE = _generated.TRANSCRIBE_ROLE_DIARIZE
+
+
+@dataclass(frozen=True)
+class DiarizeInfo:
+    sample_rate: int
+    max_speakers: int  # speaker_id is in [1, max_speakers]
 
 
 @dataclass(frozen=True)
@@ -917,6 +937,20 @@ class SortformerStreamOptions(FamilyExtension):
             ext.preset = self._presets[self.preset]
 
 
+class SortformerDiarizeOptions(FamilyExtension):
+    """Sortformer operating-point options for ``DiarizeSession.run()``
+    (diarize-run slot); same presets as :class:`SortformerStreamOptions`."""
+
+    _slot = "diarize_run"
+    _kind = _generated.TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE
+    _struct = _generated.transcribe_sortformer_diarize_ext
+    _init = "transcribe_sortformer_diarize_ext_init"
+
+    _presets = SortformerStreamOptions._presets
+    __init__ = SortformerStreamOptions.__init__
+    _apply = SortformerStreamOptions._apply
+
+
 # --- high-level handles ---------------------------------------------------
 
 
@@ -950,7 +984,8 @@ class Model:
     Compute calls are serialized per model. The native library allows at
     most one compute call in flight across ALL sessions of a model (they
     share its compute backend), so ``Session.run()``, ``run_batch()``,
-    ``stream()`` and ``Stream.feed()`` / ``finalize()`` / ``reset()`` each
+    ``stream()``, ``Stream.feed()`` / ``finalize()`` / ``reset()`` and
+    ``DiarizeSession.run()`` each
     hold a model-wide lock for the native call and for copying its results
     out. Calls on any session of the same model from other threads WAIT for
     the lock, and a waiting call can still be cancelled with its session's
@@ -962,7 +997,8 @@ class Model:
     during a feed (the C contract forbids a run between the feeds of a
     stream on another session). A successful ``stream()`` therefore takes
     a model-wide stream lease. Until that stream ends, ``run()``,
-    ``run_batch()`` and ``stream()`` on ANY session of this model (its own
+    ``run_batch()``, ``stream()`` and ``DiarizeSession.run()`` on ANY
+    session of this model (its own
     included) raise :class:`Busy` at once instead of waiting; the stream's
     own ``feed()`` / ``finalize()`` proceed. The lease is released by
     ``finalize()`` (success or failure), ``reset()``, a ``feed()`` that
@@ -1204,6 +1240,25 @@ class Model:
     def session(self, *, n_threads: int = 0, kv_type: KVType = "auto",
                 n_ctx: int = 0) -> "Session":
         return Session(self, n_threads=n_threads, kv_type=kv_type, n_ctx=n_ctx)
+
+    @property
+    def roles(self) -> frozenset[Role]:
+        mask = _lib.transcribe_model_roles(self._h)
+        return frozenset(r for r in Role if mask & r.value)
+
+    @property
+    def diarize_info(self) -> DiarizeInfo:
+        """Raises :class:`UnsupportedRole` without the DIARIZE role."""
+        info = _generated.transcribe_diarize_info()
+        _lib.transcribe_diarize_info_init(_byref(info))
+        _check(_lib.transcribe_diarize_get_info(self._h, _byref(info)),
+               "reading diarize info")
+        return DiarizeInfo(sample_rate=info.sample_rate,
+                           max_speakers=info.max_speakers)
+
+    def diarize_session(self, *, n_threads: int = 0) -> "DiarizeSession":
+        """Raises :class:`UnsupportedRole` without the DIARIZE role."""
+        return DiarizeSession(self, n_threads=n_threads)
 
     def close(self) -> None:
         """Free the model. Any session still open on it is closed first —
@@ -1847,6 +1902,100 @@ class Stream:
             model._free_or_defer(reset_and_release)
         except Exception:
             pass
+
+
+class DiarizeSession:
+    """A diarization (who spoke when) context on a model with the DIARIZE
+    role. ``run()`` follows the Session rules (see ``Model``): it takes the
+    model-wide compute lock, raises :class:`Busy` while a stream is active
+    on the model, and ``cancel()`` / ``close()`` never wait for the lock."""
+
+    def __init__(self, model: Model, *, n_threads: int = 0):
+        self._model = model  # keep the model alive for the session's lifetime
+        params = _generated.transcribe_diarize_session_params()
+        _lib.transcribe_diarize_session_params_init(_byref(params))
+        params.n_threads = n_threads
+
+        handle = ctypes.c_void_p()
+        _check(_lib.transcribe_diarize_session_init(model._h, _byref(params), _byref(handle)),
+               "opening diarize session")
+        if not handle.value:
+            raise TranscribeError("diarize session init returned a null handle")
+        self._handle = handle
+
+        self._cancel = threading.Event()  # as in Session: bind the Event, not self
+        _event = self._cancel
+        self._abort_trampoline = _ABORT_CFUNC(lambda _ud: _event.is_set())
+        _lib.transcribe_diarize_set_abort_callback(self._handle, self._abort_trampoline, None)
+        model._sessions.add(self)
+
+    _h = Session._h
+    _resolve_family = Session._resolve_family
+
+    def cancel(self) -> None:
+        """Abort an in-flight (or queued) ``run()``, which raises
+        :class:`Aborted`. Lock-free; safe from any thread."""
+        self._cancel.set()
+
+    def run(self, pcm: PCMLike, *,
+            family: FamilyExtension | None = None) -> list[SpeakerSegment]:
+        """Diarize one recording (16 kHz mono float32 PCM) and return its
+        speaker turns: grouped by speaker, time-ordered within a speaker,
+        possibly overlapping across speakers. ``family`` is an optional
+        diarize-run extension (e.g. SortformerDiarizeOptions).
+
+        Raises :class:`Aborted` after :meth:`cancel`, and :class:`Busy` if a
+        stream is active on this model."""
+        self._cancel.clear()  # before the lock wait, as in Session.run()
+        array, n_samples = _pcm_to_carray(pcm)
+        params = _generated.transcribe_diarize_params()
+        _lib.transcribe_diarize_params_init(_byref(params))
+        with self._model._exclusive(
+                "diarize_run", busy="a stream is active on this model; "
+                                    "finish or drop it before diarize run()"):
+            ext = self._resolve_family(family, "diarize_run") if family is not None else None
+            if ext is not None:
+                params.family = ctypes.cast(
+                    _byref(ext), ctypes.POINTER(_generated.transcribe_ext))
+            h = self._h  # captured under the lock; close() defers its free
+            _check(_lib.transcribe_diarize_run(h, array, n_samples, _byref(params)),
+                   "transcribe_diarize_run")
+            rows = []
+            for i in range(_lib.transcribe_diarize_n_segments(h)):
+                s = _SpeakerSegment()
+                _lib.transcribe_speaker_segment_init(_byref(s))
+                _check(_lib.transcribe_diarize_get_segment(h, i, _byref(s)),
+                       "transcribe_diarize_get_segment")
+                rows.append(_speaker_segment_from(s))
+            return rows
+
+    @property
+    def timings(self) -> Timings:
+        """Load time plus the last run's mel / encode time. Not locked, like
+        ``Session.limits``."""
+        tm = _Timings()
+        _lib.transcribe_timings_init(_byref(tm))
+        _check(_lib.transcribe_diarize_get_timings(self._h, _byref(tm)),
+               "transcribe_diarize_get_timings")
+        return _timings_from(tm)
+
+    def close(self) -> None:
+        """Free the session. Idempotent; never waits for the compute lock
+        (the free runs right after an in-flight call, as in Session)."""
+        handle = getattr(self, "_handle", None)
+        if handle is None:
+            return
+        self._handle = None
+        trampoline = getattr(self, "_abort_trampoline", None)
+
+        def free(handle=handle, _pin=trampoline):
+            _lib.transcribe_diarize_session_free(handle)
+
+        self._model._free_or_defer(free)
+
+    __enter__ = Session.__enter__
+    __exit__ = Session.__exit__
+    __del__ = Session.__del__
 
 
 def transcribe(

@@ -70,6 +70,24 @@ Long transcriptions can be cancelled from another thread with
 `session.cancel()` — the run raises `Aborted` with the partial transcript on
 `exc.partial_result` (same for `OutputTruncated`).
 
+### Diarization
+
+Models whose `model.roles` include `Role.DIARIZE` (Sortformer) answer "who
+spoke when" through a diarize session. `run()` returns `SpeakerSegment`
+rows (`speaker_id` in `1..model.diarize_info.max_speakers`), grouped by
+speaker. It shares the model-wide compute lock with transcription runs and
+raises `Busy` while a stream is active. `cancel()` and `close()` work as on
+`Session`. A model without the role raises `UnsupportedRole`, as
+`model.session()` does on a model without `Role.ASR`.
+
+```python
+with model.diarize_session() as diarizer:
+    turns = diarizer.run(pcm, family=transcribe_cpp.SortformerDiarizeOptions(
+        preset="very_high_latency"))
+    for turn in turns:
+        print(turn.speaker_id, turn.t0_ms, turn.t1_ms)
+```
+
 ## Backends
 
 `Model(backend=...)` applies a backend policy (`"auto"` uses the best

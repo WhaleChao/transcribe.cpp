@@ -64,6 +64,8 @@ def fake(monkeypatch):
                         lambda h: frees.append(("session", h.value)))
     monkeypatch.setattr(t._lib, "transcribe_model_free",
                         lambda h: frees.append(("model", h.value)))
+    monkeypatch.setattr(t._lib, "transcribe_diarize_session_free",
+                        lambda h: frees.append(("diarize", h.value)))
     resets: list = []  # session handles transcribe_stream_reset was given
     monkeypatch.setattr(t._lib, "transcribe_stream_reset",
                         lambda h: resets.append(h.value))
@@ -95,8 +97,18 @@ def fake(monkeypatch):
             made.append(s)
         return s
 
-    yield SimpleNamespace(model=model, session=session, frees=frees,
-                          resets=resets, state=state)
+    def diarize(m):
+        d = t.DiarizeSession.__new__(t.DiarizeSession)
+        d._model = m
+        d._handle = ctypes.c_void_p(next(ids))
+        d._cancel = threading.Event()
+        d._abort_trampoline = None
+        m._sessions.add(d)
+        made.append(d)
+        return d
+
+    yield SimpleNamespace(model=model, session=session, diarize=diarize,
+                          frees=frees, resets=resets, state=state)
 
     for obj in reversed(made):
         obj.close()
@@ -784,3 +796,204 @@ def test_session_close_releases_lease_after_free(fake, native, monkeypatch):
     del stream
     gc.collect()
     assert fake.resets == []
+
+
+# --- DiarizeSession.run -----------------------------------------------------------
+#
+# The DIARIZE role's run goes through the same Model._exclusive bridge as
+# Session.run: model-wide lock, Busy under a stream lease, copy-out under the
+# lock on the captured handle, deferred frees, lock-free cancel.
+
+DIARIZE_BUSY = ("a stream is active on this model; "
+                "finish or drop it before diarize run()")
+
+
+@pytest.fixture
+def diarize_native(fake, monkeypatch):
+    """Probes for the diarize entry points. ``calls`` records (name, handle,
+    whether this thread held ``owner["model"]``'s lock); two rows per run."""
+    calls: list = []
+    owner: dict = {}
+
+    def held():
+        m = owner["model"]
+        return m._compute_lock.locked() and m._compute_owner == threading.get_ident()
+
+    def run(h, pcm, n, params):
+        calls.append(("run", h.value, held()))
+        return 0
+
+    def n_segments(h):
+        calls.append(("n_segments", h.value, held()))
+        return 2
+
+    def get_segment(h, i, out):
+        calls.append(("get_segment", h.value, held()))
+        row = out._obj
+        row.t0_ms, row.t1_ms, row.speaker_id, row.p = 100 * i, 100 * i + 50, i + 1, 0.5
+        return 0
+
+    monkeypatch.setattr(t._lib, "transcribe_diarize_run", run)
+    monkeypatch.setattr(t._lib, "transcribe_diarize_n_segments", n_segments)
+    monkeypatch.setattr(t._lib, "transcribe_diarize_get_segment", get_segment)
+    return SimpleNamespace(calls=calls, owner=owner, run=run)
+
+
+ROWS = [t.SpeakerSegment(t0_ms=0, t1_ms=50, speaker_id=1, p=0.5),
+        t.SpeakerSegment(t0_ms=100, t1_ms=150, speaker_id=2, p=0.5)]
+
+
+def test_diarize_run_and_copy_out_hold_the_lock(fake, diarize_native):
+    m = fake.model()
+    d = fake.diarize(m)
+    diarize_native.owner["model"] = m
+    assert d.run(PCM) == ROWS
+    names = [c[0] for c in diarize_native.calls]
+    assert names == ["run", "n_segments", "get_segment", "get_segment"]
+    assert all(c[1] == d._handle.value and c[2] for c in diarize_native.calls)
+    assert not m._compute_lock.locked()
+
+
+def test_diarize_session_init_wires_cancel_and_registers(fake, monkeypatch):
+    m = fake.model()
+    hm = m._handle.value
+    cbs: list = []
+
+    def init(model_h, params, out):
+        out._obj.value = 0x9000
+        return 0
+
+    monkeypatch.setattr(t._lib, "transcribe_diarize_session_init", init)
+    monkeypatch.setattr(t._lib, "transcribe_diarize_set_abort_callback",
+                        lambda h, cb, ud: cbs.append((h.value, cb)))
+    d = m.diarize_session(n_threads=2)
+    assert d in set(m._sessions)
+    [(h, cb)] = cbs
+    assert h == 0x9000 and cb(None) is False
+    d.cancel()  # lock-free; flips what the native abort callback polls
+    assert cb(None) is True
+    m.close()  # closes the diarize session before freeing the model
+    assert fake.frees == [("diarize", 0x9000), ("model", hm)]
+
+
+def test_diarize_session_init_failure_raises_unsupported_role(fake, monkeypatch):
+    m = fake.model()
+    monkeypatch.setattr(t._lib, "transcribe_diarize_session_init",
+                        lambda mh, p, out: _generated.TRANSCRIBE_ERR_UNSUPPORTED_ROLE)
+    with pytest.raises(t.UnsupportedRole):
+        m.diarize_session()
+    assert not list(m._sessions)
+
+
+def test_diarize_run_waits_for_session_run(fake, diarize_native, monkeypatch):
+    m = fake.model()
+    s, d = fake.session(m), fake.diarize(m)
+    diarize_native.owner["model"] = m
+    gate = _Gate()
+    monkeypatch.setattr(t._lib, "transcribe_run", gate)
+    try:
+        a, a_box = _in_thread(s.run, PCM)
+        assert gate.entered.wait(TIMEOUT)
+        spy = _LockSpy(m)
+        b, b_box = _in_thread(d.run, PCM)
+        assert spy.waiting.wait(TIMEOUT)  # parked on the lock, not failed
+        assert b.is_alive() and not b_box and diarize_native.calls == []
+    finally:
+        gate.release.set()
+    _join(a, "session run")
+    _join(b, "queued diarize run")
+    assert "error" not in a_box and b_box.get("value") == ROWS, (a_box, b_box)
+
+
+def test_diarize_run_busy_while_stream_active(fake, native, diarize_native):
+    m = fake.model()
+    s, d = fake.session(m), fake.diarize(m)
+    diarize_native.owner["model"] = m
+    stream = s.stream()
+    with pytest.raises(t.Busy) as ei:
+        d.run(PCM)
+    assert str(ei.value) == DIARIZE_BUSY
+    assert diarize_native.calls == [] and not m._compute_lock.locked()
+    stream.finalize()
+    assert d.run(PCM) == ROWS
+
+
+def _gated_diarize_run(diarize_native, monkeypatch):
+    gate = _Gate()
+
+    def run(*args):
+        gate()
+        return diarize_native.run(*args)
+
+    monkeypatch.setattr(t._lib, "transcribe_diarize_run", run)
+    return gate
+
+
+def test_diarize_close_during_in_flight_run_defers_free(fake, diarize_native,
+                                                        monkeypatch):
+    m = fake.model()
+    d = fake.diarize(m)
+    diarize_native.owner["model"] = m
+    hd = d._handle.value
+    gate = _gated_diarize_run(diarize_native, monkeypatch)
+    try:
+        a, a_box = _in_thread(d.run, PCM)
+        assert gate.entered.wait(TIMEOUT)
+        closer, _ = _in_thread(d.close)
+        _join(closer, "diarize close() during an in-flight run")
+        assert fake.frees == [], "diarize session freed under an in-flight run"
+    finally:
+        gate.release.set()
+    _join(a, "in-flight diarize run")
+    assert a_box.get("value") == ROWS, a_box
+    assert all(c[1] == hd for c in diarize_native.calls)  # the captured handle
+    assert fake.frees == [("diarize", hd)]
+    with pytest.raises(t.TranscribeError, match="closed"):
+        d.run(PCM)
+
+
+def test_model_close_during_in_flight_diarize_run_frees_session_first(
+        fake, diarize_native, monkeypatch):
+    m = fake.model()
+    d = fake.diarize(m)
+    diarize_native.owner["model"] = m
+    hd, hm = d._handle.value, m._handle.value
+    gate = _gated_diarize_run(diarize_native, monkeypatch)
+    try:
+        a, a_box = _in_thread(d.run, PCM)
+        assert gate.entered.wait(TIMEOUT)
+        closer, _ = _in_thread(m.close)
+        _join(closer, "model.close() during an in-flight diarize run")
+        assert fake.frees == []
+    finally:
+        gate.release.set()
+    _join(a, "in-flight diarize run")
+    assert a_box.get("value") == ROWS, a_box
+    assert fake.frees == [("diarize", hd), ("model", hm)]
+
+
+def test_diarize_cancel_while_queued_is_kept(fake, diarize_native, monkeypatch):
+    m = fake.model()
+    s, d = fake.session(m), fake.diarize(m)
+    diarize_native.owner["model"] = m
+    gate = _Gate()
+    flag_at_start: list = []
+
+    def run(*args):
+        flag_at_start.append(d._cancel.is_set())
+        return diarize_native.run(*args)
+
+    monkeypatch.setattr(t._lib, "transcribe_run", gate)
+    monkeypatch.setattr(t._lib, "transcribe_diarize_run", run)
+    try:
+        a, _ = _in_thread(s.run, PCM)
+        assert gate.entered.wait(TIMEOUT)
+        spy = _LockSpy(m)
+        b, _ = _in_thread(d.run, PCM)
+        assert spy.waiting.wait(TIMEOUT)  # cleared its flag and is parked
+        d.cancel()  # must not block although the lock is held
+    finally:
+        gate.release.set()
+    _join(a, "session run")
+    _join(b, "queued diarize run")
+    assert flag_at_start == [True]
