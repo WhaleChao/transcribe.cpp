@@ -51,12 +51,10 @@ public final class Session {
     /// Transcribe one utterance. `pcm` is mono float32 at 16 kHz in [-1, 1].
     public func run(_ pcm: [Float], options: RunOptions = .init()) throws -> Transcript {
         try options.checkCStrings()
-        return try model.withCompute {
-            if model.streamActive {
-                throw TranscribeError.busy(
-                    "a stream is active on this model; finish or drop it before run()")
-            }
-            return try options.withCParams { params in
+        return try model.withCompute(
+            busyIfStreaming: "a stream is active on this model; finish or drop it before run()"
+        ) {
+            try options.withCParams { params in
                 let status = pcm.withUnsafeBufferPointer {
                     transcribe_run(ptr, $0.baseAddress, Int32($0.count), params)
                 }
@@ -72,12 +70,10 @@ public final class Session {
         _ inputs: [[Float]], options: RunOptions = .init()
     ) throws -> [Result<Transcript, Error>] {
         try options.checkCStrings()
-        return try model.withCompute {
-            if model.streamActive {
-                throw TranscribeError.busy(
-                    "a stream is active on this model; finish or drop it before runBatch()")
-            }
-            return try options.withCParams { params in
+        return try model.withCompute(
+            busyIfStreaming: "a stream is active on this model; finish or drop it before runBatch()"
+        ) {
+            try options.withCParams { params in
                 let counts = inputs.map { Int32($0.count) }
                 let status = withPCMPointers(inputs[...], []) { pointers in
                     pointers.withUnsafeBufferPointer { pp in

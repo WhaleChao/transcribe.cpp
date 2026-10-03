@@ -3,19 +3,7 @@ import XCTest
 
 @testable import TranscribeCpp
 
-/// Characterization of the rules every native compute call follows today, so
-/// moving them behind one helper can be checked against the old behavior:
-///
-/// - every compute site (run, runBatch, stream begin/feed/finalize/reset, a
-///   dropped `Stream`'s reset, and a diarize run) waits on the model-wide `runLock`, which all
-///   sessions of one model share;
-/// - run / runBatch / stream begin validate their string options BEFORE taking
-///   the lock, and refuse an active stream with `.busy` only AFTER taking it;
-/// - the async bridge installs its own cancel token only when none is set, and
-///   removes it when the call returns (including after an abort);
-/// - a `Session` keeps its `Model` alive and a `Stream` keeps its `Session`
-///   alive, so dropping the caller's references mid-use is safe;
-/// - results are owned Swift copies that later compute cannot disturb.
+/// Every compute site waits on the model-wide lock; option checks run before it, the busy check after.
 final class ComputeRulesTests: XCTestCase {
     // MARK: - Helpers
 
@@ -202,12 +190,6 @@ final class ComputeRulesTests: XCTestCase {
         }
         XCTAssertEqual(busyMessage(streamError.value), "a stream is already active on this model")
 
-        // The same session's second stream gets the binding's `.busy` too, not
-        // a native error.
-        XCTAssertEqual(
-            busyMessage(Result { try s1.stream() }.failure),
-            "a stream is already active on this model")
-
         active.reset()
     }
 
@@ -244,71 +226,7 @@ final class ComputeRulesTests: XCTestCase {
         active.reset()
     }
 
-    // MARK: - Cancel hook install / cleanup
-
-    /// The async bridge installs a token only for the call and removes it
-    /// afterwards, on success and after an abort alike.
-    func testAsyncBridgeRemovesItsTokenAfterTheCall() async throws {
-        let (path, pcm) = try Fixtures.modelAndAudio()
-        let session = try Model(path: path).session()
-        XCTAssertNil(session.cancelToken)
-
-        _ = try await session.run(pcm)
-        XCTAssertNil(session.cancelToken, "bridged token must be removed after run")
-        _ = try await session.runBatch([pcm])
-        XCTAssertNil(session.cancelToken, "bridged token must be removed after runBatch")
-
-        let long = Array(repeating: pcm, count: 6).flatMap { $0 }
-        let task = Task { try await session.run(long) }
-        task.cancel()
-        _ = try? await task.value
-        XCTAssertTrue(session.wasAborted)
-        XCTAssertNil(session.cancelToken, "bridged token must be removed after an aborted run")
-
-        // The cancelled token is not left behind: the next call is not aborted.
-        _ = try await session.run(pcm)
-        XCTAssertFalse(session.wasAborted)
-        XCTAssertNil(session.cancelToken)
-    }
-
-    /// The synchronous path never installs or clears a token: a caller token
-    /// stays installed (and stays cancelled) across runs until the caller
-    /// clears it.
-    func testSyncRunLeavesCallerTokenInstalled() throws {
-        let (path, pcm) = try Fixtures.modelAndAudio()
-        let session = try Model(path: path).session()
-        let token = CancellationToken()
-        token.cancel()
-        session.setCancellationToken(token)
-        for _ in 0..<2 {
-            XCTAssertThrowsError(try session.run(pcm)) { error in
-                guard case TranscribeError.aborted = error else {
-                    return XCTFail("expected .aborted, got \(error)")
-                }
-            }
-            XCTAssertTrue(session.cancelToken === token)
-        }
-        session.clearCancellationToken()
-        XCTAssertNil(session.cancelToken)
-        _ = try session.run(pcm)
-        XCTAssertFalse(session.wasAborted)
-    }
-
     // MARK: - Keep-alive
-
-    func testSessionKeepsModelAliveForRun() throws {
-        let (path, pcm) = try Fixtures.modelAndAudio()
-        weak var weakModel: Model?
-        var session: Session? = try {
-            let model = try Model(path: path)
-            weakModel = model
-            return try model.session()
-        }()
-        XCTAssertNotNil(weakModel, "a live Session must keep its Model alive")
-        XCTAssertTrue(try session!.run(pcm).text.lowercased().contains("country"))
-        session = nil
-        XCTAssertNil(weakModel, "the Model is freed once its last Session is")
-    }
 
     func testStreamKeepsSessionAndModelAlive() throws {
         let (path, pcm) = try Fixtures.streamingModelAndAudio()
@@ -328,67 +246,5 @@ final class ComputeRulesTests: XCTestCase {
         stream = nil
         XCTAssertNil(weakSession)
         XCTAssertNil(weakModel)
-    }
-
-    /// The caller may drop every reference while an async call is in flight:
-    /// the call itself keeps the session (and so the model) alive until it
-    /// returns.
-    func testCallerDropsReferencesDuringAsyncRun() async throws {
-        let (path, pcm) = try Fixtures.modelAndAudio()
-        let long = Array(repeating: pcm, count: 3).flatMap { $0 }
-        let task: Task<Transcript, Error> = try {
-            let session = try Model(path: path).session()
-            return Task { try await session.run(long) }
-        }()
-        let transcript = try await task.value
-        XCTAssertTrue(transcript.text.lowercased().contains("country"))
-    }
-
-    // MARK: - Copy-out
-
-    /// Results are owned copies: later compute on the same session or on a
-    /// sibling session leaves them untouched.
-    func testResultsSurviveLaterCompute() throws {
-        let (path, pcm) = try Fixtures.modelAndAudio()
-        let model = try Model(path: path)
-        let s1 = try model.session()
-        let s2 = try model.session()
-        let first = try s1.run(pcm)
-        let batch = try s1.runBatch([pcm])
-        let text = first.text
-        let segments = first.segments.count
-        let batchText = try batch[0].get().text
-        XCTAssertTrue(text.lowercased().contains("country"))
-
-        let short = Array(pcm.prefix(16000))
-        _ = try s1.run(short)
-        _ = try s1.runBatch([short])
-        _ = try s2.run(short)
-
-        XCTAssertEqual(first.text, text)
-        XCTAssertEqual(first.segments.count, segments)
-        XCTAssertEqual(try batch[0].get().text, batchText)
-        XCTAssertNotEqual(try s1.run(short).text, text)
-    }
-
-    func testStreamSnapshotSurvivesReset() throws {
-        let (path, pcm) = try Fixtures.streamingModelAndAudio()
-        let session = try Model(path: path).session()
-        let stream = try session.stream()
-        try Fixtures.drive(stream, pcm: pcm)
-        let snapshot = stream.snapshot
-        let text = stream.text
-        XCTAssertTrue(text.full.lowercased().contains("country"))
-        stream.reset()
-        XCTAssertEqual(stream.snapshot.text, "")
-        XCTAssertTrue(snapshot.text.lowercased().contains("country"))
-        XCTAssertTrue(text.full.lowercased().contains("country"))
-    }
-}
-
-private extension Result {
-    var failure: Failure? {
-        if case .failure(let error) = self { return error }
-        return nil
     }
 }

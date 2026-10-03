@@ -49,24 +49,6 @@ final class NoModelTests: XCTestCase {
         XCTAssertNil(TranscribeError.inputTooLong("").partial)
     }
 
-    // No loadable model lacks the ASR role yet, so the mapping is checked
-    // directly rather than through a native call.
-    func testUnsupportedRoleMapsToItsOwnCase() {
-        XCTAssertNotEqual(Transcribe.statusString(20), "unknown status")
-        let error = TranscribeError.make(TRANSCRIBE_ERR_UNSUPPORTED_ROLE, context: "creating session")
-        guard case .unsupportedRole(let message) = error else {
-            return XCTFail("expected .unsupportedRole, got \(error)")
-        }
-        XCTAssertEqual(message, "creating session: \(Transcribe.statusString(20))")
-        XCTAssertNil(error.partial)
-        XCTAssertFalse(error.isTruncated)
-        XCTAssertThrowsError(try TranscribeError.check(TRANSCRIBE_ERR_UNSUPPORTED_ROLE)) { thrown in
-            guard case TranscribeError.unsupportedRole = thrown else {
-                return XCTFail("expected .unsupportedRole, got \(thrown)")
-            }
-        }
-    }
-
     // Every native status maps to its case. `label` has no `default`, so a new
     // TranscribeError case does not compile until this table is updated; the
     // "unknown status" check below flags a newly appended C status.

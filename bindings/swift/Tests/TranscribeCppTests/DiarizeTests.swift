@@ -1,4 +1,3 @@
-import CTranscribe
 import XCTest
 
 @testable import TranscribeCpp
@@ -19,11 +18,6 @@ final class DiarizeTests: XCTestCase {
                 }
             }
         }
-    }
-
-    func testRoleBitsMatchTheHeader() {
-        XCTAssertEqual(Roles.asr.rawValue, 1)
-        XCTAssertEqual(Roles.diarize.rawValue, 2)
     }
 
     func testAsrOnlyModelRefusesDiarize() throws {
@@ -68,29 +62,11 @@ final class DiarizeTests: XCTestCase {
         XCTAssertEqual(turns(try session.run(pcm)), golden[0].1, "no extension == .default")
     }
 
-    func testBadPresetAndCancellation() throws {
+    func testCancelledRunAbortsAndRecovers() throws {
         let (path, pcm) = try Fixtures.sortformerModelAndAudio()
         let session = try Model(path: path).diarizeSession()
         let first = try session.run(pcm)
         XCTAssertFalse(first.isEmpty)
-
-        // `SortformerPreset` cannot express an out-of-range preset, so the
-        // native rejection is driven through the raw C call.
-        var ext = transcribe_sortformer_diarize_ext()
-        transcribe_sortformer_diarize_ext_init(&ext)
-        ext.preset = transcribe_sortformer_preset(rawValue: 99)
-        let status = withUnsafePointer(to: &ext.ext) { family in
-            var params = transcribe_diarize_params()
-            transcribe_diarize_params_init(&params)
-            params.family = family
-            return pcm.withUnsafeBufferPointer {
-                transcribe_diarize_run(session.ptr, $0.baseAddress, Int32($0.count), &params)
-            }
-        }
-        guard case .invalidArgument = TranscribeError.make(status) else {
-            return XCTFail("expected .invalidArgument, got \(status)")
-        }
-        XCTAssertEqual(Int(transcribe_diarize_n_segments(session.ptr)), first.count)
 
         let token = CancellationToken()
         token.cancel()

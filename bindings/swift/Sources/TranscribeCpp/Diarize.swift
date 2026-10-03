@@ -59,11 +59,9 @@ public final class DiarizeSession {
     /// Diarize one recording (16 kHz mono float32). Rows are grouped by
     /// speaker, time-ordered within a speaker; speakers may overlap.
     public func run(_ pcm: [Float], options: DiarizeOptions = .init()) throws -> [SpeakerSegment] {
-        try model.withCompute {
-            if model.streamActive {
-                throw TranscribeError.busy(
-                    "a stream is active on this model; finish or drop it before diarize run()")
-            }
+        try model.withCompute(
+            busyIfStreaming: "a stream is active on this model; finish or drop it before diarize run()"
+        ) {
             let status = withDiarizeExtension(options.family) { ext in
                 var params = transcribe_diarize_params()
                 transcribe_diarize_params_init(&params)

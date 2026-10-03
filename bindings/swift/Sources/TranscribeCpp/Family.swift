@@ -46,27 +46,6 @@ public struct WhisperRunOptions: Sendable {
     }
 }
 
-/// Sortformer streaming operating point (latency / accuracy trade-off).
-/// The menu is discrete (jointly-tuned bundles), not a latency dial;
-/// `.default` keeps the GGUF-shipped checkpoint configuration.
-/// `.veryHighLatency` (~30 s lookahead) is the offline-file operating
-/// point; `.lowLatency` (~1 s) is the real-time point.
-public enum SortformerPreset: Sendable {
-    case `default`
-    case veryHighLatency
-    case highLatency
-    case lowLatency
-
-    var cValue: transcribe_sortformer_preset {
-        switch self {
-        case .default: return TRANSCRIBE_SORTFORMER_PRESET_DEFAULT
-        case .veryHighLatency: return TRANSCRIBE_SORTFORMER_PRESET_VERY_HIGH_LATENCY
-        case .highLatency: return TRANSCRIBE_SORTFORMER_PRESET_HIGH_LATENCY
-        case .lowLatency: return TRANSCRIBE_SORTFORMER_PRESET_LOW_LATENCY
-        }
-    }
-}
-
 public enum RunExtension: Sendable {
     case whisper(WhisperRunOptions)
 
@@ -180,6 +159,27 @@ func withStreamExtension<R>(
 }
 
 // MARK: - DIARIZE_RUN-slot extensions
+
+/// Sortformer streaming operating point (latency / accuracy trade-off).
+/// The menu is discrete (jointly-tuned bundles), not a latency dial;
+/// `.default` keeps the GGUF-shipped checkpoint configuration.
+/// `.veryHighLatency` (~30 s lookahead) is the offline-file operating
+/// point; `.lowLatency` (~1 s) is the real-time point.
+public enum SortformerPreset: Sendable {
+    case `default`
+    case veryHighLatency
+    case highLatency
+    case lowLatency
+
+    var cValue: transcribe_sortformer_preset {
+        switch self {
+        case .default: return TRANSCRIBE_SORTFORMER_PRESET_DEFAULT
+        case .veryHighLatency: return TRANSCRIBE_SORTFORMER_PRESET_VERY_HIGH_LATENCY
+        case .highLatency: return TRANSCRIBE_SORTFORMER_PRESET_HIGH_LATENCY
+        case .lowLatency: return TRANSCRIBE_SORTFORMER_PRESET_LOW_LATENCY
+        }
+    }
+}
 
 /// Sortformer options for `DiarizeSession.run`.
 public struct SortformerDiarizeOptions: Sendable {

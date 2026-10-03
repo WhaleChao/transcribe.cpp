@@ -30,6 +30,7 @@ final class CancelTests: XCTestCase {
             }
         }
         XCTAssertTrue(session.wasAborted)
+        XCTAssertTrue(session.cancelToken === token, "a sync run leaves the caller's token installed")
     }
 
     func testCrossThreadCancelOfInFlightRun() throws {
@@ -77,6 +78,7 @@ final class CancelTests: XCTestCase {
             }
         }
         XCTAssertTrue(session.wasAborted)
+        XCTAssertNil(session.cancelToken, "the bridged token is removed after the call")
     }
 
     /// The bridge must never clobber a caller-installed token: there is a single

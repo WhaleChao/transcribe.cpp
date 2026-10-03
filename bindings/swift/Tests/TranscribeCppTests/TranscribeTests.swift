@@ -125,12 +125,16 @@ final class TranscribeTests: XCTestCase {
         let (path, pcm) = try Fixtures.modelAndAudio()
         // Drop the local Model reference; the Session's strong ref must keep the
         // native model alive (close-ordering safety under ARC).
-        let session: Session = try {
+        weak var weakModel: Model?
+        var session: Session? = try {
             let model = try Model(path: path)
+            weakModel = model
             return try model.session()
         }()
-        let transcript = try session.run(pcm)
-        XCTAssertTrue(transcript.text.lowercased().contains("country"))
+        XCTAssertNotNil(weakModel, "a live Session must keep its Model alive")
+        XCTAssertTrue(try session!.run(pcm).text.lowercased().contains("country"))
+        session = nil
+        XCTAssertNil(weakModel, "the Model is freed once its last Session is")
     }
 
     func testSharedModelAcrossThreadsSerializes() throws {

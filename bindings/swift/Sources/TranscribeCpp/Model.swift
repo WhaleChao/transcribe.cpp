@@ -1,12 +1,6 @@
 import CTranscribe
 import Foundation
 
-/// A loaded model. Safe to share across threads (`@unchecked Sendable`): the C
-/// API allows concurrent queries and session creation, and the compute path is
-/// serialized by an internal lock (the C "one in-flight run per model"
-/// contract — the same per-model mutex + stream lease the Rust binding uses). A
-/// `Model` outlives every `Session` derived from it; the session holds a strong
-/// reference, so close ordering is automatic under ARC.
 /// The kinds of work a model serves (`transcribe_model_roles`). ASR is
 /// `Session`; DIARIZE is `DiarizeSession`.
 public struct Roles: OptionSet, Sendable {
@@ -16,6 +10,12 @@ public struct Roles: OptionSet, Sendable {
     public static let diarize = Roles(rawValue: TRANSCRIBE_ROLE_DIARIZE.rawValue)
 }
 
+/// A loaded model. Safe to share across threads (`@unchecked Sendable`): the C
+/// API allows concurrent queries and session creation, and the compute path is
+/// serialized by an internal lock (the C "one in-flight run per model"
+/// contract — the same per-model mutex + stream lease the Rust binding uses). A
+/// `Model` outlives every `Session` derived from it; the session holds a strong
+/// reference, so close ordering is automatic under ARC.
 public final class Model: @unchecked Sendable {
     let ptr: OpaquePointer
     /// Serializes the run/feed/finalize compute path across all sessions, and
@@ -24,23 +24,25 @@ public final class Model: @unchecked Sendable {
     /// The compute lease: `true` while some session holds an ACTIVE stream.
     /// The C contract allows at most one in-flight run/stream across ALL
     /// sessions of a model, and an active stream spans begin..finalize/reset/
-    /// drop — so `run`/`runBatch`/another `stream`/a diarize `run` are refused with `.busy`
-    /// while it is held, rather than racing into the documented UB (corrupted
-    /// decodes on CPU, command-buffer failures on Metal). Always accessed under
-    /// `runLock`.
+    /// drop — so `run`/`runBatch`/another `stream`/a diarize `run` are refused
+    /// with `.busy` while it is held, rather than racing into the documented UB
+    /// (corrupted decodes on CPU, command-buffer failures on Metal). Always
+    /// accessed under `runLock`.
     var streamActive = false
 
-    /// Run `body` holding this model's compute lock. Every native call that
-    /// computes or mutates a session's results goes through here, so all
-    /// sessions of one model share the C "one in-flight compute per model"
-    /// exclusion. `body` also copies results into owned Swift values before
-    /// the lock is released, and may read or change `streamActive`. Argument
-    /// checks that must not wait on the lock stay before the call; the
-    /// `streamActive` refusal, where a site has one, is `body`'s first step.
+    /// Run `body` (a native compute call and its copy-out) under the model-wide
+    /// compute lock; `busyIfStreaming` then refuses an active stream with `.busy`.
     func withCompute<R>(_ body: () throws -> R) rethrows -> R {
         runLock.lock()
         defer { runLock.unlock() }
         return try body()
+    }
+
+    func withCompute<R>(busyIfStreaming message: String, _ body: () throws -> R) throws -> R {
+        try withCompute {
+            if streamActive { throw TranscribeError.busy(message) }
+            return try body()
+        }
     }
 
     /// Load a model from a GGUF file. Runs the pre-1.0 version gate first.

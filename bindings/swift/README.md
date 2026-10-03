@@ -105,16 +105,12 @@ such as Sortformer (DIARIZE only) return speaker turns from a `DiarizeSession`:
 
 ```swift
 let model = try Model(path: "diar_streaming_sortformer_4spk-v2.1-F32.gguf")
-let info = try model.diarizeInfo  // sampleRate, maxSpeakers
 let turns = try model.diarizeSession().run(
     pcm, options: DiarizeOptions(family: .sortformer(.init(preset: .veryHighLatency))))
 for t in turns { print(t.speakerId, t.t0Ms, t.t1Ms) }
 ```
 
-Diarize runs share the model's compute lock and stream lease with sessions, and
-take a `CancellationToken` the same way. `model.capabilities` and
-`model.session()` are ASR-only and throw `TranscribeError.unsupportedRole` on a
-model without `.asr`, such as Sortformer.
+`capabilities` and `session()` throw `.unsupportedRole` on a model without `.asr`.
 
 ## Backends
 

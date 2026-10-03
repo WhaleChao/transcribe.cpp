@@ -192,10 +192,7 @@ extension Session {
         _ runOptions: RunOptions = .init(), _ streamOptions: StreamOptions = .init()
     ) throws -> Stream {
         try runOptions.checkCStrings()
-        return try model.withCompute {
-            if model.streamActive {
-                throw TranscribeError.busy("a stream is already active on this model")
-            }
+        return try model.withCompute(busyIfStreaming: "a stream is already active on this model") {
             let status = runOptions.withCParams { runParams in
                 streamOptions.withCParams { streamParams in
                     transcribe_stream_begin(ptr, runParams, streamParams)
