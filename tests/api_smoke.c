@@ -77,6 +77,7 @@ static void test_status_string(void) {
         TRANSCRIBE_ERR_INPUT_TOO_LONG,
         TRANSCRIBE_ERR_OUTPUT_TRUNCATED,
         TRANSCRIBE_ERR_OUTPUT_REPETITION,
+        TRANSCRIBE_ERR_UNSUPPORTED_ROLE,
     };
     for (size_t i = 0; i < sizeof(all) / sizeof(all[0]); ++i) {
         const char * s = transcribe_status_string(all[i]);
@@ -526,6 +527,7 @@ static void test_model_introspection_null(void) {
 
     /* The feature probe is also NULL-safe and returns false for every
      * known feature value plus any out-of-range enum. */
+    CHECK(transcribe_model_roles(NULL) == 0);
     CHECK(transcribe_model_supports(NULL, TRANSCRIBE_FEATURE_INITIAL_PROMPT) == false);
     CHECK(transcribe_model_supports(NULL, TRANSCRIBE_FEATURE_TEMPERATURE_FALLBACK) == false);
     CHECK(transcribe_model_supports(NULL, TRANSCRIBE_FEATURE_LONG_FORM) == false);

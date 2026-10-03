@@ -313,6 +313,15 @@ typedef enum {
      * the check. See docs/input-limits.md.
      */
     TRANSCRIBE_ERR_OUTPUT_REPETITION      = 19,
+    /*
+     * The model does not serve the role the call needs. Returned by
+     * transcribe_session_init / transcribe_open and
+     * transcribe_model_get_capabilities (all ASR) for a model whose
+     * transcribe_model_roles() lacks TRANSCRIBE_ROLE_ASR, and by each
+     * role's session init for a model lacking that role. Check the mask
+     * with transcribe_model_roles() first.
+     */
+    TRANSCRIBE_ERR_UNSUPPORTED_ROLE       = 20,
 } transcribe_status;
 
 /*
@@ -1304,15 +1313,37 @@ struct transcribe_capabilities {
 TRANSCRIBE_API void transcribe_capabilities_init(struct transcribe_capabilities * out);
 
 /*
+ * Roles: the kinds of work a loaded model can do. ASR is this header's
+ * transcribe_session_* / transcribe_run* API. The other roles each have
+ * their own header under include/transcribe/ and their own session type.
+ * A model may serve more than one role. Values are bits; append-only.
+ */
+typedef enum {
+    TRANSCRIBE_ROLE_ASR     = 1u << 0,
+    TRANSCRIBE_ROLE_DIARIZE = 1u << 1,
+} transcribe_role;
+
+/*
+ * Bitmask of transcribe_role values the loaded model serves. Fixed at load
+ * and never changes for the model's lifetime. Returns 0 for NULL. Entry
+ * points that need a role the model lacks return
+ * TRANSCRIBE_ERR_UNSUPPORTED_ROLE.
+ */
+TRANSCRIBE_API uint32_t transcribe_model_roles(const struct transcribe_model * model);
+
+/*
  * Read model capabilities into caller-owned storage. The caller
  * initializes *out_caps via transcribe_capabilities_init() (zero-fill);
  * the library writes only the fields that fit and leaves tail bytes
  * beyond the caller's struct_size untouched.
  *
  * Returns:
- *   TRANSCRIBE_ERR_INVALID_ARG     model or out_caps is NULL.
- *   TRANSCRIBE_ERR_BAD_STRUCT_SIZE out_caps->struct_size is 0 or
- *                                  smaller than the library's minimum.
+ *   TRANSCRIBE_ERR_INVALID_ARG      model or out_caps is NULL.
+ *   TRANSCRIBE_ERR_BAD_STRUCT_SIZE  out_caps->struct_size is 0 or
+ *                                   smaller than the library's minimum.
+ *   TRANSCRIBE_ERR_UNSUPPORTED_ROLE the model does not serve
+ *                                   TRANSCRIBE_ROLE_ASR. These are ASR
+ *                                   capabilities; *out_caps is untouched.
  *
  * Pointer fields written by the library (e.g. `languages`) point at
  * model-owned storage and remain valid until transcribe_model_free().
@@ -1495,6 +1526,10 @@ TRANSCRIBE_API void transcribe_model_free(struct transcribe_model * model);
  *
  * params may be NULL for library defaults, or initialize a struct with
  * transcribe_session_params_init(). See transcribe_model_load_file.
+ *
+ * Returns TRANSCRIBE_ERR_UNSUPPORTED_ROLE when the model does not serve
+ * TRANSCRIBE_ROLE_ASR (see transcribe_model_roles); transcribe_open
+ * returns the same and frees the model it loaded.
  */
 TRANSCRIBE_API transcribe_status transcribe_session_init(struct transcribe_model *                model,
                                                          const struct transcribe_session_params * params,

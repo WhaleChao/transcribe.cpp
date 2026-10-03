@@ -13,7 +13,7 @@ import ctypes as _c
 # Stable digest of the ABI surface below (structs, enums, macros, layout,
 # prototypes). A native provider package echoes this back so the API
 # package can reject an ABI-mismatched provider before dlopen.
-PUBLIC_HEADER_HASH = "59b9a92b47074666"
+PUBLIC_HEADER_HASH = "1537ea60b442dd53"
 
 # === enum constants ===
 TRANSCRIBE_OK = 0
@@ -36,6 +36,7 @@ TRANSCRIBE_ERR_UNSUPPORTED_ITN = 16
 TRANSCRIBE_ERR_INPUT_TOO_LONG = 17
 TRANSCRIBE_ERR_OUTPUT_TRUNCATED = 18
 TRANSCRIBE_ERR_OUTPUT_REPETITION = 19
+TRANSCRIBE_ERR_UNSUPPORTED_ROLE = 20
 TRANSCRIBE_ABI_MODEL_LOAD_PARAMS = 0
 TRANSCRIBE_ABI_SESSION_PARAMS = 1
 TRANSCRIBE_ABI_RUN_PARAMS = 2
@@ -90,6 +91,8 @@ TRANSCRIBE_DEVICE_TYPE_CPU = 0
 TRANSCRIBE_DEVICE_TYPE_GPU = 1
 TRANSCRIBE_DEVICE_TYPE_IGPU = 2
 TRANSCRIBE_DEVICE_TYPE_ACCEL = 3
+TRANSCRIBE_ROLE_ASR = 1
+TRANSCRIBE_ROLE_DIARIZE = 2
 TRANSCRIBE_FEATURE_INITIAL_PROMPT = 0
 TRANSCRIBE_FEATURE_TEMPERATURE_FALLBACK = 1
 TRANSCRIBE_FEATURE_LONG_FORM = 2
@@ -335,6 +338,8 @@ def configure(lib):
     lib.transcribe_model_load_params_init.argtypes = [_c.POINTER(transcribe_model_load_params)]
     lib.transcribe_model_meta_val_str.restype = _c.c_char_p
     lib.transcribe_model_meta_val_str.argtypes = [_c.c_void_p, _c.c_char_p]
+    lib.transcribe_model_roles.restype = _c.c_uint32
+    lib.transcribe_model_roles.argtypes = [_c.c_void_p]
     lib.transcribe_model_supports.restype = _c.c_bool
     lib.transcribe_model_supports.argtypes = [_c.c_void_p, _c.c_int]
     lib.transcribe_model_variant_string.restype = _c.c_char_p

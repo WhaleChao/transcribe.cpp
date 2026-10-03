@@ -816,6 +816,9 @@ static transcribe_status transcribe_session_init_impl(struct transcribe_model * 
     if (model == nullptr) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
+    if ((model->roles & transcribe::k_role_asr) == 0) {
+        return TRANSCRIBE_ERR_UNSUPPORTED_ROLE;
+    }
     // NULL params means "all defaults" (see transcribe_model_load_file).
     struct transcribe_session_params params_defaults;
     transcribe_session_params_init(&params_defaults);
@@ -1769,6 +1772,11 @@ extern "C" transcribe_status transcribe_model_get_capabilities(const struct tran
     }
     if (const auto st = check_struct_size(out_caps->struct_size, k_min_capabilities_size); st != TRANSCRIBE_OK) {
         return st;
+    }
+    // These are ASR capabilities: a model without the ASR role gets an
+    // error, not a zeroed struct that reads as "supports nothing".
+    if ((model->roles & transcribe::k_role_asr) == 0) {
+        return TRANSCRIBE_ERR_UNSUPPORTED_ROLE;
     }
     // Preserve the caller-declared size, then write only the prefix
     // that fits in both the caller's buffer and this library's view;

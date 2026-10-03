@@ -11,7 +11,7 @@
 // Stable digest of the ABI surface (structs, enums, macros, layout,
 // prototypes), computed by the Python oracle and pinned here so a header
 // ABI change turns this binding's drift check red for conscious review.
-export const PUBLIC_HEADER_HASH = "59b9a92b47074666";
+export const PUBLIC_HEADER_HASH = "1537ea60b442dd53";
 
 // === enum constants ===
 export const TRANSCRIBE_OK = 0;
@@ -34,6 +34,7 @@ export const TRANSCRIBE_ERR_UNSUPPORTED_ITN = 16;
 export const TRANSCRIBE_ERR_INPUT_TOO_LONG = 17;
 export const TRANSCRIBE_ERR_OUTPUT_TRUNCATED = 18;
 export const TRANSCRIBE_ERR_OUTPUT_REPETITION = 19;
+export const TRANSCRIBE_ERR_UNSUPPORTED_ROLE = 20;
 export const TRANSCRIBE_ABI_MODEL_LOAD_PARAMS = 0;
 export const TRANSCRIBE_ABI_SESSION_PARAMS = 1;
 export const TRANSCRIBE_ABI_RUN_PARAMS = 2;
@@ -88,6 +89,8 @@ export const TRANSCRIBE_DEVICE_TYPE_CPU = 0;
 export const TRANSCRIBE_DEVICE_TYPE_GPU = 1;
 export const TRANSCRIBE_DEVICE_TYPE_IGPU = 2;
 export const TRANSCRIBE_DEVICE_TYPE_ACCEL = 3;
+export const TRANSCRIBE_ROLE_ASR = 1;
+export const TRANSCRIBE_ROLE_DIARIZE = 2;
 export const TRANSCRIBE_FEATURE_INITIAL_PROMPT = 0;
 export const TRANSCRIBE_FEATURE_TEMPERATURE_FALLBACK = 1;
 export const TRANSCRIBE_FEATURE_LONG_FORM = 2;
@@ -242,6 +245,7 @@ export const FUNCTION_SIGNATURES: Record<string, FnSig> = {
   'transcribe_model_load_file': { ret: 'transcribe_status', args: ['const char *', 'const struct transcribe_model_load_params *', 'struct transcribe_model **'] },
   'transcribe_model_load_params_init': { ret: 'void', args: ['struct transcribe_model_load_params *'] },
   'transcribe_model_meta_val_str': { ret: 'const char *', args: ['const struct transcribe_model *', 'const char *'] },
+  'transcribe_model_roles': { ret: 'uint32_t', args: ['const struct transcribe_model *'] },
   'transcribe_model_supports': { ret: '_Bool', args: ['const struct transcribe_model *', 'transcribe_feature'] },
   'transcribe_model_variant_string': { ret: 'const char *', args: ['const struct transcribe_model *'] },
   'transcribe_moonshine_streaming_stream_ext_init': { ret: 'void', args: ['struct transcribe_moonshine_streaming_stream_ext *'] },

@@ -112,6 +112,8 @@ extern "C" const char * transcribe_status_string(int status) {
             return "output truncated: decode hit the context/generation cap before end-of-stream";
         case TRANSCRIBE_ERR_OUTPUT_REPETITION:
             return "output repetition: decode stopped when the output began repeating itself";
+        case TRANSCRIBE_ERR_UNSUPPORTED_ROLE:
+            return "model does not serve the requested role";
         default:
             return "unknown status";
     }
@@ -935,6 +937,10 @@ extern "C" const char * transcribe_model_meta_val_str(const struct transcribe_mo
     }
     const auto it = model->meta.find(key);
     return it != model->meta.end() ? it->second.c_str() : "";
+}
+
+extern "C" uint32_t transcribe_model_roles(const struct transcribe_model * model) {
+    return model != nullptr ? model->roles : 0;
 }
 
 extern "C" const char * transcribe_model_backend(const struct transcribe_model * model) {
