@@ -346,6 +346,7 @@ impl AbiStruct {
 
 /// The slot a family extension is pointed at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ExtSlot {
     /// `transcribe_run_params::family`.
     Run,

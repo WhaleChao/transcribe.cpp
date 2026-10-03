@@ -7,10 +7,11 @@
 mod common;
 
 use transcribe_cpp::{
-    Backend, CommitPolicy, Diarize, Feature, Itn, KvType, Model, MoonshineStreamingOptions, Pnc,
-    RunExtension, RunOptions, SessionOptions, SortformerPreset, SortformerStreamOptions,
-    SpeakerSegment, StreamExtension, StreamOptions, StreamState, StreamText, StreamUpdate, Task,
-    TimestampKind, Timings, Token, Transcript, WhisperRunOptions, Word,
+    Backend, CommitPolicy, DeviceType, Diarize, ExtSlot, Feature, Itn, KvType, Model,
+    MoonshineStreamingOptions, Pnc, RunExtension, RunOptions, SessionOptions, SortformerPreset,
+    SortformerStreamOptions, SpeakerSegment, StreamExtension, StreamOptions, StreamState,
+    StreamText, StreamUpdate, Task, TimestampKind, Timings, Token, Transcript, WhisperRunOptions,
+    Word,
 };
 
 fn json_round_trip<T>(value: &T) -> T
@@ -162,6 +163,8 @@ fn stream_results_and_enums_round_trip() {
     assert_round_trips(&StreamState::Failed);
     assert_round_trips(&Backend::CpuAccel);
     assert_round_trips(&Feature::TranscriptPrefix);
+    assert_round_trips(&DeviceType::Igpu);
+    assert_round_trips(&ExtSlot::Stream);
 }
 
 #[test]
@@ -186,9 +189,9 @@ fn transcript_round_trips_nan_confidence() {
 
 #[test]
 fn missing_fields_take_defaults() {
-    // Option and result structs are `serde(default)`: a sparse document fills
-    // the rest from `Default`, so a peer built against an older field set
-    // still decodes.
+    // Option and result structs are `serde(default)`: a sparse JSON document
+    // fills the rest from `Default`. (Positional binary formats get no such
+    // tolerance; both peers must share a crate version.)
     let run: RunOptions = serde_json::from_str(r#"{"language":"fr"}"#).unwrap();
     assert_eq!(
         run,

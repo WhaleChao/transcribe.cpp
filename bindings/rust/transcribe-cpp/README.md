@@ -121,7 +121,7 @@ registry mutation is a startup-only operation and must not race those calls.
 The optional `serde` feature derives `Serialize`/`Deserialize` on the plain-data
 types: `RunOptions`, `StreamOptions`, `SessionOptions`, the family extensions,
 `Transcript` and its rows, `StreamUpdate`, `StreamText`, `Capabilities`,
-`SessionLimits`, and the parameter enums. Use it to send requests and results
+`SessionLimits`, `DeviceType`, and the parameter enums. Use it to send requests and results
 across a process boundary (e.g. running inference in a crash-isolated worker)
 or to persist them.
 
@@ -132,8 +132,10 @@ cargo add transcribe-cpp --features serde
 - Handles (`Model`, `Session`, `Stream`, `Device`) and `Error` are not
   serializable. Send `Backend` plus a persisted `device_id` and resolve the
   `Device` in the receiving process; map `Error` into your own wire type.
-- Option and result structs are `#[serde(default)]`, so a document missing
-  fields decodes with the `Default` values.
+- Option and result structs are `#[serde(default)]`, so in self-describing
+  formats such as JSON a document missing fields decodes with the `Default`
+  values. Positional binary formats (postcard, bincode) get no such tolerance:
+  both sides must be built from the same crate version.
 - `Token::p` and `SpeakerSegment::p` are NaN when a family reports no
   confidence. JSON writes NaN as `null`, which decodes back to NaN; binary
   formats keep the raw value.
