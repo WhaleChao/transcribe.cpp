@@ -49,6 +49,7 @@ from .errors import (
     OutputTruncated,
     TranscribeError,
     UnsupportedRequest,
+    UnsupportedRole,
     exception_for_status,
     raise_for_status,
 )
@@ -112,6 +113,7 @@ __all__ = [
     "OutOfMemory",
     "BackendError",
     "UnsupportedRequest",
+    "UnsupportedRole",
     "AbiError",
     "Aborted",
     "Busy",

@@ -42,6 +42,7 @@ def test_every_status_maps_to_documented_subclass():
         errors.ERR_INPUT_TOO_LONG: t.InputTooLong,
         errors.ERR_OUTPUT_TRUNCATED: t.OutputTruncated,
         errors.ERR_OUTPUT_REPETITION: t.OutputRepetition,
+        errors.ERR_UNSUPPORTED_ROLE: t.UnsupportedRole,
     }
     # The mapping table covers every non-OK status the header defines, and
     # nothing else (a new C status must be mapped deliberately, not by
@@ -73,6 +74,17 @@ def test_output_repetition_is_an_output_truncated():
     assert exc.partial_result is None
 
 
+def test_unsupported_role_is_its_own_type():
+    # A role mismatch is a property of the loaded model, not of a run option:
+    # it must not be caught by an UnsupportedRequest handler.
+    exc = errors.exception_for_status(errors.ERR_UNSUPPORTED_ROLE, "no role")
+    assert type(exc) is t.UnsupportedRole
+    assert not isinstance(exc, t.UnsupportedRequest)
+    assert exc.status == errors.ERR_UNSUPPORTED_ROLE == 20
+    assert "UnsupportedRole" in t.__all__
+    assert t.UnsupportedRole is errors.UnsupportedRole
+
+
 def test_exception_for_status_builds_without_raising():
     exc = errors.exception_for_status(errors.ERR_ABORTED, "aborted", "run")
     assert isinstance(exc, t.Aborted)
@@ -88,6 +100,7 @@ def test_status_constants_come_from_generated_layer():
     assert errors.ERR_ABORTED == _generated.TRANSCRIBE_ERR_ABORTED
     assert errors.ERR_OUTPUT_TRUNCATED == _generated.TRANSCRIBE_ERR_OUTPUT_TRUNCATED
     assert errors.OK == _generated.TRANSCRIBE_OK
+    assert errors.ERR_UNSUPPORTED_ROLE == _generated.TRANSCRIBE_ERR_UNSUPPORTED_ROLE
 
 
 # --- integration: real native calls raise the mapped classes ----------------
@@ -104,6 +117,54 @@ def test_junk_model_file_raises_model_load_error(tmp_path):
     junk.write_bytes(b"this is not a gguf file" * 64)
     with pytest.raises(t.ModelLoadError):
         t.Model(junk)
+
+
+def _fake_model(monkeypatch):
+    """A Model around a fake handle (no GGUF). transcribe_model_free is
+    patched to a no-op; the caller must close() it while that patch is still
+    active so the fake handle never reaches the real library."""
+    import ctypes
+    import weakref
+
+    monkeypatch.setattr(t._lib, "transcribe_model_free", lambda h: None)
+    m = t.Model.__new__(t.Model)
+    m._sessions = weakref.WeakSet()
+    m._init_compute_state()
+    m._handle = ctypes.c_void_p(0x1000)
+    return m
+
+
+def test_capabilities_on_model_without_asr_role_raises_unsupported_role(
+    monkeypatch,
+):
+    # transcribe_model_get_capabilities returns UNSUPPORTED_ROLE for a model
+    # without the ASR role; Model.capabilities surfaces it as the typed error.
+    monkeypatch.setattr(t._lib, "transcribe_model_get_capabilities",
+                        lambda h, caps: errors.ERR_UNSUPPORTED_ROLE)
+    m = _fake_model(monkeypatch)
+    try:
+        with pytest.raises(t.UnsupportedRole) as ei:
+            m.capabilities
+        assert ei.value.status == errors.ERR_UNSUPPORTED_ROLE
+        assert "reading capabilities" in str(ei.value)
+    finally:
+        m.close()
+
+
+def test_session_on_model_without_asr_role_raises_unsupported_role(monkeypatch):
+    # transcribe_session_init returns UNSUPPORTED_ROLE (no handle) for a model
+    # without the ASR role; opening a session surfaces the typed error.
+    monkeypatch.setattr(t._lib, "transcribe_session_init",
+                        lambda m, params, out: errors.ERR_UNSUPPORTED_ROLE)
+    m = _fake_model(monkeypatch)
+    try:
+        with pytest.raises(t.UnsupportedRole) as ei:
+            m.session()
+        assert ei.value.status == errors.ERR_UNSUPPORTED_ROLE
+        assert "opening session" in str(ei.value)
+        assert not list(m._sessions)
+    finally:
+        m.close()
 
 
 def test_invalid_spec_k_drafts_rejected_before_native_call():
