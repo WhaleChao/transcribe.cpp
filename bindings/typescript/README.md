@@ -109,10 +109,29 @@ const stream = await session.stream({ family: { kind: "moonshine" } });
 model.accepts({ kind: "whisper" }); // does this model take that extension?
 ```
 
+### Diarization (DIARIZE role)
+
+`model.roles` lists what a model serves (`"asr"`, `"diarize"`). A diarization
+model (e.g. Sortformer) answers who spoke when; ASR calls on a model without
+`"asr"`, and diarize calls on one without `"diarize"`, throw `UnsupportedRole`.
+
+```ts
+const { sampleRate, maxSpeakers } = model.diarizeInfo;
+using diarizer = model.createDiarizeSession();
+const turns = await diarizer.run(pcm, {
+  family: { kind: "sortformer_diarize", preset: "very_high_latency" },
+});
+for (const t of turns) console.log(t.speakerId, t.t0Ms, t.t1Ms);
+```
+
+`run` takes a `signal` like `Session.run`, and `diarizer.timings` reports the
+last run. A diarize run is a compute like any other: it shares the model's
+one-at-a-time rule and `Busy` refusal below.
+
 ### Resource management
 
-`TranscribeModel`, `Session`, and `Stream` all implement `Symbol.dispose`, so
-`using` works (TypeScript 5.2+ / Node 22+):
+`TranscribeModel`, `Session`, `DiarizeSession`, and `Stream` all implement
+`Symbol.dispose`, so `using` works (TypeScript 5.2+ / Node 22+):
 
 ```ts
 using model = await TranscribeModel.load("model.gguf");
@@ -150,8 +169,9 @@ native compute to a **libuv worker thread** (via koffi's async calls), so the
 event loop stays responsive while inference runs.
 
 The C library allows **one compute in flight per model** — a `run`, a `runBatch`,
-or an *active stream* — across all of its sessions. The binding enforces this:
-every compute call serializes through an internal model-wide mutex, and an active
+a diarize `run`, or an *active stream* — across all of its sessions. The binding
+enforces this: every compute call serializes through an internal model-wide
+mutex, and an active
 stream holds a model-wide lease for its whole lifetime. While a stream is active
 (after `stream()`, before `finalize()`/`reset()`), a `run`/`runBatch`/`stream` on
 any session of that model is refused with a `Busy` error rather than allowed to

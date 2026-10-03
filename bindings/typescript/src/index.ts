@@ -34,6 +34,9 @@ import type {
   CommitPolicy,
   DeviceType,
   Diarize,
+  DiarizeInfo,
+  DiarizeOptions,
+  DiarizeSessionOptions,
   ExtSlot,
   FamilyExtension,
   Feature,
@@ -42,6 +45,7 @@ import type {
   ModelOptions,
   PcmLike,
   Pnc,
+  Role,
   Segment,
   SpeakerSegment,
   SessionLimits,
@@ -121,6 +125,10 @@ const FEATURES: Record<Feature, number> = {
   context_prompt: g.TRANSCRIBE_FEATURE_CONTEXT_PROMPT,
   instruct: g.TRANSCRIBE_FEATURE_INSTRUCT,
   transcript_prefix: g.TRANSCRIBE_FEATURE_TRANSCRIPT_PREFIX,
+};
+const ROLES: Record<Role, number> = {
+  asr: g.TRANSCRIBE_ROLE_ASR,
+  diarize: g.TRANSCRIBE_ROLE_DIARIZE,
 };
 
 // ---- helpers ---------------------------------------------------------------
@@ -499,39 +507,49 @@ function materialize(n: Native, acc: Accessors): Transcript {
     });
   }
 
-  const speakerSegments: SpeakerSegment[] = [];
-  for (let i = 0, c = acc.nSpeakerSegments(); i < c; i++) {
-    const s: any = {};
-    F.speakerSegmentInit(s);
-    check(n, acc.getSpeakerSegment(i, s), `reading speaker segment ${i}`);
-    speakerSegments.push({
-      t0Ms: num(s.t0_ms),
-      t1Ms: num(s.t1_ms),
-      speakerId: s.speaker_id,
-      p: s.p,
-    });
-  }
-
-  const tm: any = {};
-  F.timingsInit(tm);
-  check(n, acc.getTimings(tm), "reading timings");
-  const timings: Timings = {
-    loadMs: tm.load_ms,
-    melMs: tm.mel_ms,
-    encodeMs: tm.encode_ms,
-    decodeMs: tm.decode_ms,
-  };
-
   return {
     text: acc.fullText() ?? "",
     rawText: acc.rawText() ?? "",
     language: acc.detectedLanguage() ?? "",
     timestampKind: TIMESTAMP_NAMES[acc.returnedTimestampKind()] ?? "none",
     segments,
-    speakerSegments,
+    speakerSegments: readSpeakerSegments(n, acc.nSpeakerSegments(), acc.getSpeakerSegment),
     words,
     tokens,
-    timings,
+    timings: readTimings(n, acc.getTimings),
+  };
+}
+
+// Shared by transcripts and the DIARIZE role's results.
+function readSpeakerSegments(
+  n: Native,
+  count: number,
+  get: (i: number, out: any) => number,
+): SpeakerSegment[] {
+  const out: SpeakerSegment[] = [];
+  for (let i = 0; i < count; i++) {
+    const s: any = {};
+    n.F.speakerSegmentInit(s);
+    check(n, get(i, s), `reading speaker segment ${i}`);
+    out.push({
+      t0Ms: num(s.t0_ms),
+      t1Ms: num(s.t1_ms),
+      speakerId: s.speaker_id,
+      p: s.p,
+    });
+  }
+  return out;
+}
+
+function readTimings(n: Native, get: (out: any) => number): Timings {
+  const tm: any = {};
+  n.F.timingsInit(tm);
+  check(n, get(tm), "reading timings");
+  return {
+    loadMs: tm.load_ms,
+    melMs: tm.mel_ms,
+    encodeMs: tm.encode_ms,
+    decodeMs: tm.decode_ms,
   };
 }
 
@@ -551,6 +569,7 @@ const STREAM_STATES: Record<number, StreamState> = {
 const SLOT: Record<ExtSlot, number> = {
   run: g.TRANSCRIBE_EXT_SLOT_RUN,
   stream: g.TRANSCRIBE_EXT_SLOT_STREAM,
+  diarize_run: g.TRANSCRIBE_EXT_SLOT_DIARIZE_RUN,
 };
 
 interface FamilyReg {
@@ -621,9 +640,20 @@ const FAMILY: Record<string, FamilyReg> = {
     kind: g.TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM,
     type: "transcribe_sortformer_stream_ext",
     init: "sortformerStreamExtInit",
-    map: (o) => ({ preset: SORTFORMER_PRESET[o.preset as string] }),
+    map: (o) => sortformerPreset(o),
+  },
+  sortformer_diarize: {
+    slot: "diarize_run",
+    kind: g.TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE,
+    type: "transcribe_sortformer_diarize_ext",
+    init: "sortformerDiarizeExtInit",
+    map: (o) => sortformerPreset(o),
   },
 };
+
+const sortformerPreset = (o: any) => ({
+  preset: o.preset === undefined ? undefined : lookup(SORTFORMER_PRESET, o.preset, "sortformer preset"),
+});
 
 const SORTFORMER_PRESET: Record<string, number> = {
   default: g.TRANSCRIBE_SORTFORMER_PRESET_DEFAULT,
@@ -755,17 +785,137 @@ interface SessionControl {
 
 const SESSION_CONTROL = new WeakMap<Session, SessionControl>();
 
+/**
+ * One native session handle under the model's compute rules, shared by Session
+ * and DiarizeSession. Each holds it in a private field, so none of this is
+ * reachable from user code. `setAbort` is the role's set_abort_callback.
+ */
+class SessionCore {
+  #n: Native;
+  #h: any;
+  #lock: Mutex; // shared with the model; serializes compute model-wide
+  #setAbort: any;
+  #inFlight: string | null = null; // set while a native call runs on a worker
+  #disposed = false;
+
+  constructor(n: Native, handle: any, lock: Mutex, setAbort: any) {
+    this.#n = n;
+    this.#h = handle;
+    this.#lock = lock;
+    this.#setAbort = setAbort;
+  }
+
+  get handle(): any {
+    if (this.#disposed) throw new TranscribeError("session has been disposed");
+    return this.#h;
+  }
+
+  get disposed(): boolean {
+    return this.#disposed;
+  }
+
+  get inFlight(): string | null {
+    return this.#inFlight;
+  }
+
+  /** Reads touch the session; forbidden while a worker call is in flight. */
+  assertNotComputing(what: string): void {
+    if (this.#inFlight) {
+      throw new TranscribeError(
+        `cannot read session ${what} while ${this.#inFlight} is in flight; await it first`,
+      );
+    }
+  }
+
+  /**
+   * Run `body` as this session's one native compute: the single path every
+   * run / batch / stream begin / feed / finalize / diarize run takes (Stream
+   * reaches it via SESSION_CONTROL). It queues on the model-wide FIFO lock, so
+   * no two computes on one model overlap and queued native frees (deferFree)
+   * run only after it drains. Once the lock is held, `gate` is applied —
+   * disposal, then the stream lease — before `body` runs. `body` opens the
+   * in-flight window (abort callback + in-flight mark) around its worker
+   * await, and copies its result out before returning, i.e. before the lock
+   * is released.
+   *
+   * Deliberately not `async`: refusals are returned as rejected promises and
+   * `body`'s promise is returned as-is, so settle timing matches the inline
+   * lock bodies this replaced.
+   */
+  exclusive<T>(
+    gate: ComputeGate,
+    body: (open: ComputeWindow) => Promise<T>,
+  ): Promise<T> {
+    return this.#lock.run(() => {
+      if (gate.recheckDisposed && this.#disposed)
+        return Promise.reject(new TranscribeError("session has been disposed"));
+      if (gate.busyOp !== null && this.#lock.streamActive)
+        return Promise.reject(busyError(gate.busyOp));
+      return body(this.#openComputeWindow);
+    });
+  }
+
+  /** See ComputeWindow. Only valid inside an exclusive() body. */
+  #openComputeWindow: ComputeWindow = (kind, signal) => {
+    const cancel = this.#installAbort(signal);
+    this.#inFlight = kind;
+    return () => {
+      if (this.#inFlight === kind) this.#inFlight = null;
+      cancel?.();
+    };
+  };
+
+  /**
+   * Wire an AbortSignal to a native abort callback for one run. The callback is
+   * installed on *this session's* handle, but install/run/uninstall is only safe
+   * because every caller holds the model-wide #lock for the whole run — the lock,
+   * not the per-session handle, is what guarantees no run overlaps the window
+   * between setAbort(cb) and setAbort(null). A future change that relaxes the
+   * lock must keep this install/uninstall paired within one run.
+   */
+  #installAbort(signal?: AbortSignal): (() => void) | null {
+    if (!signal) return null;
+    const n = this.#n;
+    const flag = { aborted: signal.aborted };
+    const onAbort = () => {
+      flag.aborted = true;
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    const cbPtr = n.koffi.register(
+      () => flag.aborted,
+      n.koffi.pointer(n.abortProto),
+    );
+    this.#setAbort(this.handle, cbPtr, null);
+    return () => {
+      this.#setAbort(this.handle, null, null);
+      n.koffi.unregister(cbPtr);
+      signal.removeEventListener("abort", onAbort);
+    };
+  }
+
+  /**
+   * Mark disposed now (use-after-dispose throws immediately) and free the
+   * native handle behind the model lock: a worker may still hold it, and a
+   * free mid-call is a use-after-free. Queuing on the FIFO lock runs the free
+   * (then `after`) once any in-flight and queued compute drains.
+   */
+  dispose(free: (h: any) => void, after?: () => void): void {
+    this.#disposed = true;
+    const h = this.#h;
+    this.#h = null;
+    deferFree(this.#lock, () => free(h), after);
+  }
+}
+
 // ---- Session ---------------------------------------------------------------
 
 export class Session {
   #n: Native;
-  #h: any;
+  #core: SessionCore;
   #model: TranscribeModel; // keep the model alive while this session lives
   #lock: Mutex; // shared with the model; serializes compute model-wide
   #untrack: (self: Session) => void; // drop self from the model's session set
-  #inFlight: string | null = null; // set while a native call runs on a worker
   #activeStream: Stream | null = null; // current wrapper for the session's native stream slot
-  #disposed = false;
 
   /** @internal */
   constructor(
@@ -777,12 +927,12 @@ export class Session {
   ) {
     this.#n = n;
     this.#model = model;
-    this.#h = handle;
+    this.#core = new SessionCore(n, handle, lock, n.F.setAbortCallback);
     this.#lock = lock;
     this.#untrack = untrack;
     SESSION_CONTROL.set(this, {
-      exclusive: (gate, body) => this.#exclusive(gate, body),
-      currentCompute: () => this.#inFlight,
+      exclusive: (gate, body) => this.#core.exclusive(gate, body),
+      currentCompute: () => this.#core.inFlight,
       isCurrentStream: (stream) => this.#activeStream === stream,
       replaceCurrentStream: (stream) => {
         if (this.#activeStream && this.#activeStream !== stream) {
@@ -798,58 +948,11 @@ export class Session {
 
   /** @internal */
   get handle(): any {
-    if (this.#disposed) throw new TranscribeError("session has been disposed");
-    return this.#h;
+    return this.#core.handle;
   }
-
-  /** Reads touch the session; forbidden while a worker call is in flight. */
-  #assertNotComputing(what: string): void {
-    if (this.#inFlight) {
-      throw new TranscribeError(
-        `cannot read session ${what} while ${this.#inFlight} is in flight; await it first`,
-      );
-    }
-  }
-
-  /**
-   * Run `body` as this session's one native compute: the single path every
-   * run / batch / stream begin / feed / finalize takes (Stream reaches it via
-   * SESSION_CONTROL). It queues on the model-wide FIFO lock, so no two
-   * computes on one model overlap and queued native frees (deferFree) run only
-   * after it drains. Once the lock is held, `gate` is applied — disposal, then
-   * the stream lease — before `body` runs. `body` opens the in-flight window
-   * (abort callback + in-flight mark) around its worker await, and copies its
-   * result out before returning, i.e. before the lock is released.
-   *
-   * Deliberately not `async`: refusals are returned as rejected promises and
-   * `body`'s promise is returned as-is, so settle timing matches the inline
-   * lock bodies this replaced.
-   */
-  #exclusive<T>(
-    gate: ComputeGate,
-    body: (open: ComputeWindow) => Promise<T>,
-  ): Promise<T> {
-    return this.#lock.run(() => {
-      if (gate.recheckDisposed && this.#disposed)
-        return Promise.reject(new TranscribeError("session has been disposed"));
-      if (gate.busyOp !== null && this.#lock.streamActive)
-        return Promise.reject(busyError(gate.busyOp));
-      return body(this.#openComputeWindow);
-    });
-  }
-
-  /** See ComputeWindow. Only valid inside an #exclusive body. */
-  #openComputeWindow: ComputeWindow = (kind, signal) => {
-    const cancel = this.#installAbort(signal);
-    this.#inFlight = kind;
-    return () => {
-      if (this.#inFlight === kind) this.#inFlight = null;
-      cancel?.();
-    };
-  };
 
   get limits(): SessionLimits {
-    this.#assertNotComputing("limits");
+    this.#core.assertNotComputing("limits");
     const n = this.#n;
     const l: any = {};
     n.F.sessionLimitsInit(l);
@@ -877,7 +980,7 @@ export class Session {
 
     const p = this.#buildRunParams(opts);
 
-    return this.#exclusive({ recheckDisposed: true, busyOp: "run" }, async (open) => {
+    return this.#core.exclusive({ recheckDisposed: true, busyOp: "run" }, async (open) => {
       const close = open("run()", opts.signal);
       let status: number;
       try {
@@ -972,7 +1075,7 @@ export class Session {
     const counts = Int32Array.from(arrays, (a) => a.length);
     const p = this.#buildRunParams(opts);
 
-    return this.#exclusive({ recheckDisposed: true, busyOp: "runBatch" }, async (open) => {
+    return this.#core.exclusive({ recheckDisposed: true, busyOp: "runBatch" }, async (open) => {
       const close = open("runBatch()", opts.signal);
       let status: number;
       try {
@@ -1065,7 +1168,7 @@ export class Session {
     // The gate rechecks disposal inside the lock: dispose() may have run after
     // we captured `h` but before this queued body — don't begin a stream on a
     // dead session. Begin is a synchronous native call, so no in-flight window.
-    return this.#exclusive({ recheckDisposed: true, busyOp: "begin a stream" }, async () => {
+    return this.#core.exclusive({ recheckDisposed: true, busyOp: "begin a stream" }, async () => {
       check(n, F.streamBegin(h, rp, sp), "transcribe_stream_begin");
       this.#lock.streamActive = true; // claim the lease for the whole stream lifetime
       // The Stream holds the Session (not a raw handle) so its calls fail fast
@@ -1078,42 +1181,13 @@ export class Session {
     }).finally(() => freeRunParams(n, rp)); // begin copied the prompting strings
   }
 
-  /**
-   * Wire an AbortSignal to a native abort callback for one run. The callback is
-   * installed on *this session's* handle, but install/run/uninstall is only safe
-   * because every caller holds the model-wide #lock for the whole run — the lock,
-   * not the per-session handle, is what guarantees no run overlaps the window
-   * between setAbortCallback(cb) and setAbortCallback(null). A future change that
-   * relaxes the lock must keep this install/uninstall paired within one run.
-   */
-  #installAbort(signal?: AbortSignal): (() => void) | null {
-    if (!signal) return null;
-    const n = this.#n;
-    const flag = { aborted: signal.aborted };
-    const onAbort = () => {
-      flag.aborted = true;
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    const cbPtr = n.koffi.register(
-      () => flag.aborted,
-      n.koffi.pointer(n.abortProto),
-    );
-    n.F.setAbortCallback(this.handle, cbPtr, null);
-    return () => {
-      n.F.setAbortCallback(this.handle, null, null);
-      n.koffi.unregister(cbPtr);
-      signal.removeEventListener("abort", onAbort);
-    };
-  }
-
   get wasAborted(): boolean {
-    this.#assertNotComputing("wasAborted");
+    this.#core.assertNotComputing("wasAborted");
     return this.#n.F.wasAborted(this.handle);
   }
 
   dispose(): void {
-    if (this.#disposed) return;
-    this.#disposed = true;
+    if (this.#core.disposed) return;
     this.#untrack(this); // stop the model from holding a dead session
     // Deactivate any live stream NOW (its reset() no-ops, reads throw via the
     // disposed handle), but release its model lease only inside the deferred
@@ -1123,19 +1197,7 @@ export class Session {
     this.#activeStream = null;
     const teardown = stream ? STREAM_TEARDOWN.get(stream) : undefined;
     teardown?.deactivate();
-    // Free behind the model lock: a run/feed worker may still hold this handle,
-    // and sessionFree mid-call is a use-after-free. Queuing on the FIFO lock
-    // runs the free after any in-flight (and queued) compute drains. The JS-side
-    // guard is already synchronous (#disposed/handle), so use-after-dispose
-    // still throws immediately; only the native free + lease release are deferred.
-    const n = this.#n;
-    const h = this.#h;
-    this.#h = null;
-    deferFree(
-      this.#lock,
-      () => n.F.sessionFree(h),
-      () => teardown?.releaseLease(),
-    );
+    this.#core.dispose(this.#n.F.sessionFree, () => teardown?.releaseLease());
   }
 
   [Symbol.dispose](): void {
@@ -1380,13 +1442,84 @@ export class Stream {
   }
 }
 
+// ---- DiarizeSession --------------------------------------------------------
+
+/** A DIARIZE-role session: who spoke when. Same compute rules as Session. */
+export class DiarizeSession {
+  #n: Native;
+  #core: SessionCore;
+  #model: TranscribeModel; // keep the model alive while this session lives
+  #untrack: (self: DiarizeSession) => void;
+
+  /** @internal */
+  constructor(
+    n: Native,
+    model: TranscribeModel,
+    handle: any,
+    lock: Mutex,
+    untrack: (self: DiarizeSession) => void,
+  ) {
+    this.#n = n;
+    this.#model = model;
+    this.#core = new SessionCore(n, handle, lock, n.F.diarizeSetAbortCallback);
+    this.#untrack = untrack;
+  }
+
+  /**
+   * Diarize one recording; returns its speaker turns, grouped by speaker and
+   * time-ordered within a speaker (turns of different speakers may overlap).
+   * The input PCM is borrowed, not copied (see Session.run).
+   */
+  async run(pcm: PcmLike, opts: DiarizeOptions = {}): Promise<SpeakerSegment[]> {
+    const n = this.#n;
+    const F = n.F;
+    const h = this.#core.handle;
+    const samples = toFloat32(pcm);
+    const p: any = {};
+    F.diarizeParamsInit(p);
+    if (opts.family)
+      p.family = buildFamily(n, this.#model.handle, opts.family, "diarize_run");
+
+    return this.#core.exclusive({ recheckDisposed: true, busyOp: "diarize" }, async (open) => {
+      const close = open("run()", opts.signal);
+      let status: number;
+      try {
+        status = await callAsync<number>(F.diarizeRun, h, samples, samples.length, p);
+      } finally {
+        close();
+      }
+      check(n, status, "transcribe_diarize_run");
+      return readSpeakerSegments(n, F.diarizeNSegments(h), (i, o) =>
+        F.diarizeGetSegment(h, i, o),
+      );
+    });
+  }
+
+  /** load_ms plus the last run's mel / encode time. */
+  get timings(): Timings {
+    this.#core.assertNotComputing("timings");
+    const h = this.#core.handle;
+    return readTimings(this.#n, (o) => this.#n.F.diarizeGetTimings(h, o));
+  }
+
+  dispose(): void {
+    if (this.#core.disposed) return;
+    this.#untrack(this);
+    this.#core.dispose(this.#n.F.diarizeSessionFree);
+  }
+
+  [Symbol.dispose](): void {
+    this.dispose();
+  }
+}
+
 // ---- Model -----------------------------------------------------------------
 
 export class TranscribeModel {
   #n: Native;
   #h: any;
   #disposed = false;
-  #sessions = new Set<Session>();
+  #sessions = new Set<Session | DiarizeSession>();
   #lock = new Mutex(); // serializes compute across all sessions of this model
 
   private constructor(n: Native, handle: any) {
@@ -1466,6 +1599,38 @@ export class TranscribeModel {
     } finally {
       session.dispose(); // untracks itself from #sessions
     }
+  }
+
+  /** The roles this model serves; ASR calls on a model without "asr" throw UnsupportedRole. */
+  get roles(): readonly Role[] {
+    const mask = this.#n.F.modelRoles(this.handle);
+    return (Object.keys(ROLES) as Role[]).filter((r) => mask & ROLES[r]);
+  }
+
+  /** Static facts of a "diarize" model; UnsupportedRole otherwise. */
+  get diarizeInfo(): DiarizeInfo {
+    const n = this.#n;
+    const info: any = {};
+    n.F.diarizeInfoInit(info);
+    check(n, n.F.diarizeGetInfo(this.handle, info), "reading diarize info");
+    return { sampleRate: info.sample_rate, maxSpeakers: info.max_speakers };
+  }
+
+  /** Open a DIARIZE-role session; UnsupportedRole on a model without "diarize". */
+  createDiarizeSession(opts: DiarizeSessionOptions = {}): DiarizeSession {
+    const n = this.#n;
+    const p: any = {};
+    n.F.diarizeSessionParamsInit(p);
+    if (opts.nThreads !== undefined) p.n_threads = opts.nThreads;
+    const out: any[] = [null];
+    check(n, n.F.diarizeSessionInit(this.handle, p, out), "opening diarize session");
+    if (!out[0])
+      throw new TranscribeError("diarize session init returned a null handle");
+    const session = new DiarizeSession(n, this, out[0], this.#lock, (s) =>
+      this.#sessions.delete(s),
+    );
+    this.#sessions.add(session);
+    return session;
   }
 
   get capabilities(): Capabilities {
