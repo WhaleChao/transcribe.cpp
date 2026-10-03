@@ -713,9 +713,40 @@ const STREAM_TEARDOWN = new WeakMap<
   { deactivate(): void; invalidate(): void; releaseLease(): void }
 >();
 
+/**
+ * How Session.#exclusive admits a compute call once it holds the model lock.
+ * The checks run in field order: disposal, then the stream lease.
+ */
+interface ComputeGate {
+  /**
+   * Recheck disposal inside the lock: dispose() may have run after the caller
+   * captured the handle but before its queued body. feed()/finalize() check
+   * only before queuing (their native free is queued behind them).
+   */
+  recheckDisposed: boolean;
+  /**
+   * The op named in the Busy refusal while a stream holds the model lease, or
+   * null when the caller is that stream (feed()/finalize()).
+   */
+  busyOp: string | null;
+}
+
+/**
+ * Opens the in-flight window around one worker call: installs `signal`'s abort
+ * callback, then marks the session busy as `kind` so result reads fail fast.
+ * The returned close() clears the mark, then uninstalls the callback; call it
+ * in a `finally` right after the worker await.
+ */
+type ComputeWindow = (kind: string, signal?: AbortSignal) => () => void;
+
+/** The gate for calls made by the stream that holds the model lease. */
+const STREAM_LEASE_HOLDER: ComputeGate = { recheckDisposed: false, busyOp: null };
+
 interface SessionControl {
-  enterCompute(kind: string): void;
-  leaveCompute(kind: string): void;
+  exclusive<T>(
+    gate: ComputeGate,
+    body: (open: ComputeWindow) => Promise<T>,
+  ): Promise<T>;
   currentCompute(): string | null;
   isCurrentStream(stream: Stream): boolean;
   replaceCurrentStream(stream: Stream): void;
@@ -750,12 +781,7 @@ export class Session {
     this.#lock = lock;
     this.#untrack = untrack;
     SESSION_CONTROL.set(this, {
-      enterCompute: (kind) => {
-        this.#inFlight = kind;
-      },
-      leaveCompute: (kind) => {
-        if (this.#inFlight === kind) this.#inFlight = null;
-      },
+      exclusive: (gate, body) => this.#exclusive(gate, body),
       currentCompute: () => this.#inFlight,
       isCurrentStream: (stream) => this.#activeStream === stream,
       replaceCurrentStream: (stream) => {
@@ -784,6 +810,43 @@ export class Session {
       );
     }
   }
+
+  /**
+   * Run `body` as this session's one native compute: the single path every
+   * run / batch / stream begin / feed / finalize takes (Stream reaches it via
+   * SESSION_CONTROL). It queues on the model-wide FIFO lock, so no two
+   * computes on one model overlap and queued native frees (deferFree) run only
+   * after it drains. Once the lock is held, `gate` is applied — disposal, then
+   * the stream lease — before `body` runs. `body` opens the in-flight window
+   * (abort callback + in-flight mark) around its worker await, and copies its
+   * result out before returning, i.e. before the lock is released.
+   *
+   * Deliberately not `async`: refusals are returned as rejected promises and
+   * `body`'s promise is returned as-is, so settle timing matches the inline
+   * lock bodies this replaced.
+   */
+  #exclusive<T>(
+    gate: ComputeGate,
+    body: (open: ComputeWindow) => Promise<T>,
+  ): Promise<T> {
+    return this.#lock.run(() => {
+      if (gate.recheckDisposed && this.#disposed)
+        return Promise.reject(new TranscribeError("session has been disposed"));
+      if (gate.busyOp !== null && this.#lock.streamActive)
+        return Promise.reject(busyError(gate.busyOp));
+      return body(this.#openComputeWindow);
+    });
+  }
+
+  /** See ComputeWindow. Only valid inside an #exclusive body. */
+  #openComputeWindow: ComputeWindow = (kind, signal) => {
+    const cancel = this.#installAbort(signal);
+    this.#inFlight = kind;
+    return () => {
+      if (this.#inFlight === kind) this.#inFlight = null;
+      cancel?.();
+    };
+  };
 
   get limits(): SessionLimits {
     this.#assertNotComputing("limits");
@@ -814,18 +877,13 @@ export class Session {
 
     const p = this.#buildRunParams(opts);
 
-    return this.#lock.run(async () => {
-      if (this.#disposed)
-        throw new TranscribeError("session has been disposed");
-      if (this.#lock.streamActive) throw busyError("run");
-      const cancel = this.#installAbort(opts.signal);
+    return this.#exclusive({ recheckDisposed: true, busyOp: "run" }, async (open) => {
+      const close = open("run()", opts.signal);
       let status: number;
-      this.#inFlight = "run()";
       try {
         status = await callAsync<number>(F.run, h, samples, samples.length, p);
       } finally {
-        this.#inFlight = null;
-        cancel?.();
+        close();
       }
 
       if (
@@ -914,13 +972,9 @@ export class Session {
     const counts = Int32Array.from(arrays, (a) => a.length);
     const p = this.#buildRunParams(opts);
 
-    return this.#lock.run(async () => {
-      if (this.#disposed)
-        throw new TranscribeError("session has been disposed");
-      if (this.#lock.streamActive) throw busyError("runBatch");
-      const cancel = this.#installAbort(opts.signal);
+    return this.#exclusive({ recheckDisposed: true, busyOp: "runBatch" }, async (open) => {
+      const close = open("runBatch()", opts.signal);
       let status: number;
-      this.#inFlight = "runBatch()";
       try {
         status = await callAsync<number>(
           F.runBatch,
@@ -931,8 +985,7 @@ export class Session {
           p,
         );
       } finally {
-        this.#inFlight = null;
-        cancel?.();
+        close();
       }
       // A batch returns OK even with per-utterance failures; only a top-level
       // error (or a whole-batch abort) is fatal here.
@@ -1009,12 +1062,10 @@ export class Session {
     if (opts.family)
       sp.family = buildFamily(n, this.#model.handle, opts.family, "stream");
 
-    return this.#lock.run(async () => {
-      // Recheck inside the lock: dispose() may have run after we captured `h`
-      // but before this queued body — don't begin a stream on a dead session.
-      if (this.#disposed)
-        throw new TranscribeError("session has been disposed");
-      if (this.#lock.streamActive) throw busyError("begin a stream");
+    // The gate rechecks disposal inside the lock: dispose() may have run after
+    // we captured `h` but before this queued body — don't begin a stream on a
+    // dead session. Begin is a synchronous native call, so no in-flight window.
+    return this.#exclusive({ recheckDisposed: true, busyOp: "begin a stream" }, async () => {
       check(n, F.streamBegin(h, rp, sp), "transcribe_stream_begin");
       this.#lock.streamActive = true; // claim the lease for the whole stream lifetime
       // The Stream holds the Session (not a raw handle) so its calls fail fast
@@ -1164,7 +1215,7 @@ export class Stream {
     this.#assertCurrent("feed");
     if (!this.#active) throw new TranscribeError("stream has been reset");
     const samples = toFloat32(pcm);
-    return this.#lock.run(async () => {
+    return this.#sessionControl.exclusive(STREAM_LEASE_HOLDER, async (open) => {
       const u: any = {};
       n.F.streamUpdateInit(u);
       // The native feed runs on a libuv worker. While it is in flight the
@@ -1172,7 +1223,7 @@ export class Stream {
       // is single-threaded (transcribe.h), and stream_get_text hands back
       // pointers the feed may free/realloc. Flag the owning session so every
       // result getter fails fast instead of racing into a use-after-free.
-      this.#sessionControl.enterCompute("feed()/finalize()");
+      const close = open("feed()/finalize()");
       try {
         const status = await callAsync<number>(
           n.F.streamFeed,
@@ -1189,7 +1240,7 @@ export class Stream {
         }
         check(n, status, "transcribe_stream_feed");
       } finally {
-        this.#sessionControl.leaveCompute("feed()/finalize()");
+        close();
       }
       return toStreamUpdate(u);
     });
@@ -1201,10 +1252,10 @@ export class Stream {
     const h = this.#session.handle; // throws if the session was disposed
     this.#assertCurrent("finalize stream");
     if (!this.#active) throw new TranscribeError("stream has been reset");
-    return this.#lock.run(async () => {
+    return this.#sessionControl.exclusive(STREAM_LEASE_HOLDER, async (open) => {
       const u: any = {};
       n.F.streamUpdateInit(u);
-      this.#sessionControl.enterCompute("feed()/finalize()");
+      const close = open("feed()/finalize()");
       try {
         check(
           n,
@@ -1212,7 +1263,7 @@ export class Stream {
           "transcribe_stream_finalize",
         );
       } finally {
-        this.#sessionControl.leaveCompute("feed()/finalize()");
+        close();
         // Finalize ends the active stream (FINISHED on success, FAILED on
         // error), so the model is free again — release the lease either way.
         this.#releaseLease();
