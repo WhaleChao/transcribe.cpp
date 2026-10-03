@@ -74,6 +74,19 @@ struct transcribe_sortformer_stream_ext {
 /* Fills ext.size/kind and preset = DEFAULT (GGUF-shipped cfg). */
 TRANSCRIBE_API void transcribe_sortformer_stream_ext_init(struct transcribe_sortformer_stream_ext * ext);
 
+/* 'SFDR' little-endian = 0x52444653 (DIARIZE_RUN slot) */
+#define TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE 0x52444653u
+
+/* transcribe_diarize_params::family: the operating point for
+ * transcribe_diarize_run. */
+struct transcribe_sortformer_diarize_ext {
+    struct transcribe_ext        ext;
+    transcribe_sortformer_preset preset;
+};
+
+/* Fills ext.size/kind and preset = DEFAULT. */
+TRANSCRIBE_API void transcribe_sortformer_diarize_ext_init(struct transcribe_sortformer_diarize_ext * ext);
+
 #ifdef __cplusplus
 }
 #endif

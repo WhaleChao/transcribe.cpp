@@ -28,6 +28,7 @@
 #include "transcribe-log.h"
 #include "transcribe-model.h"
 #include "transcribe-path.h"
+#include "transcribe/diarize.h"
 
 #if defined(TRANSCRIBE_GGML_BACKEND_DL) && defined(_WIN32)
 #    ifndef WIN32_LEAN_AND_MEAN
@@ -172,6 +173,12 @@ extern "C" size_t transcribe_abi_struct_size(transcribe_abi_struct which) {
             return sizeof(struct transcribe_device_info);
         case TRANSCRIBE_ABI_SPEAKER_SEGMENT:
             return sizeof(struct transcribe_speaker_segment);
+        case TRANSCRIBE_ABI_DIARIZE_INFO:
+            return sizeof(struct transcribe_diarize_info);
+        case TRANSCRIBE_ABI_DIARIZE_SESSION_PARAMS:
+            return sizeof(struct transcribe_diarize_session_params);
+        case TRANSCRIBE_ABI_DIARIZE_PARAMS:
+            return sizeof(struct transcribe_diarize_params);
     }
     return 0;  // unknown id: "cannot verify", never a real size
 }
@@ -208,6 +215,12 @@ extern "C" size_t transcribe_abi_struct_align(transcribe_abi_struct which) {
             return alignof(struct transcribe_device_info);
         case TRANSCRIBE_ABI_SPEAKER_SEGMENT:
             return alignof(struct transcribe_speaker_segment);
+        case TRANSCRIBE_ABI_DIARIZE_INFO:
+            return alignof(struct transcribe_diarize_info);
+        case TRANSCRIBE_ABI_DIARIZE_SESSION_PARAMS:
+            return alignof(struct transcribe_diarize_session_params);
+        case TRANSCRIBE_ABI_DIARIZE_PARAMS:
+            return alignof(struct transcribe_diarize_params);
     }
     return 0;
 }

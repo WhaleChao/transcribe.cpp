@@ -378,21 +378,25 @@ TRANSCRIBE_API const char * transcribe_version_commit(void);
  * is append-only; do not renumber existing values.
  */
 typedef enum {
-    TRANSCRIBE_ABI_MODEL_LOAD_PARAMS = 0,
-    TRANSCRIBE_ABI_SESSION_PARAMS    = 1,
-    TRANSCRIBE_ABI_RUN_PARAMS        = 2,
-    TRANSCRIBE_ABI_STREAM_PARAMS     = 3,
-    TRANSCRIBE_ABI_CAPABILITIES      = 4,
-    TRANSCRIBE_ABI_TIMINGS           = 5,
-    TRANSCRIBE_ABI_SEGMENT           = 6,
-    TRANSCRIBE_ABI_WORD              = 7,
-    TRANSCRIBE_ABI_TOKEN             = 8,
-    TRANSCRIBE_ABI_STREAM_UPDATE     = 9,
-    TRANSCRIBE_ABI_STREAM_TEXT       = 10,
-    TRANSCRIBE_ABI_SESSION_LIMITS    = 11,
-    TRANSCRIBE_ABI_EXT               = 12,
-    TRANSCRIBE_ABI_DEVICE_INFO       = 13,
-    TRANSCRIBE_ABI_SPEAKER_SEGMENT   = 14,
+    TRANSCRIBE_ABI_MODEL_LOAD_PARAMS      = 0,
+    TRANSCRIBE_ABI_SESSION_PARAMS         = 1,
+    TRANSCRIBE_ABI_RUN_PARAMS             = 2,
+    TRANSCRIBE_ABI_STREAM_PARAMS          = 3,
+    TRANSCRIBE_ABI_CAPABILITIES           = 4,
+    TRANSCRIBE_ABI_TIMINGS                = 5,
+    TRANSCRIBE_ABI_SEGMENT                = 6,
+    TRANSCRIBE_ABI_WORD                   = 7,
+    TRANSCRIBE_ABI_TOKEN                  = 8,
+    TRANSCRIBE_ABI_STREAM_UPDATE          = 9,
+    TRANSCRIBE_ABI_STREAM_TEXT            = 10,
+    TRANSCRIBE_ABI_SESSION_LIMITS         = 11,
+    TRANSCRIBE_ABI_EXT                    = 12,
+    TRANSCRIBE_ABI_DEVICE_INFO            = 13,
+    TRANSCRIBE_ABI_SPEAKER_SEGMENT        = 14,
+    /* include/transcribe/diarize.h */
+    TRANSCRIBE_ABI_DIARIZE_INFO           = 15,
+    TRANSCRIBE_ABI_DIARIZE_SESSION_PARAMS = 16,
+    TRANSCRIBE_ABI_DIARIZE_PARAMS         = 17,
 } transcribe_abi_struct;
 
 /* sizeof / alignof of the selected public struct, or 0 for an unknown id.
@@ -676,9 +680,11 @@ TRANSCRIBE_API transcribe_status transcribe_ext_check(const struct transcribe_ex
  */
 typedef enum {
     /* transcribe_run_params::family */
-    TRANSCRIBE_EXT_SLOT_RUN    = 0,
+    TRANSCRIBE_EXT_SLOT_RUN         = 0,
     /* transcribe_stream_params::family */
-    TRANSCRIBE_EXT_SLOT_STREAM = 1,
+    TRANSCRIBE_EXT_SLOT_STREAM      = 1,
+    /* transcribe_diarize_params::family (include/transcribe/diarize.h) */
+    TRANSCRIBE_EXT_SLOT_DIARIZE_RUN = 2,
 } transcribe_ext_slot;
 
 /*

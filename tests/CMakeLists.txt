@@ -387,6 +387,23 @@ add_test(NAME transcribe_stream_hook_throw_unit
     COMMAND transcribe_stream_hook_throw_unit)
 
 # -----------------------------------------------------------------------------
+# DIARIZE role dispatcher (fake arch)
+# -----------------------------------------------------------------------------
+
+add_executable(transcribe_diarize_dispatch_unit
+    diarize_dispatch_unit.cpp)
+
+target_link_libraries(transcribe_diarize_dispatch_unit PRIVATE transcribe)
+
+target_include_directories(transcribe_diarize_dispatch_unit PRIVATE
+    ${CMAKE_SOURCE_DIR}/src)
+
+transcribe_apply_warnings(transcribe_diarize_dispatch_unit)
+
+add_test(NAME transcribe_diarize_dispatch_unit
+    COMMAND transcribe_diarize_dispatch_unit)
+
+# -----------------------------------------------------------------------------
 # Dispatcher-level streaming entry-point behavior
 # -----------------------------------------------------------------------------
 
@@ -1396,6 +1413,21 @@ if(TRANSCRIBE_BUILD_REAL_MODEL_TESTS)
     add_test(NAME transcribe_sortformer_stream_ext_unit
         COMMAND transcribe_sortformer_stream_ext_unit)
     set_tests_properties(transcribe_sortformer_stream_ext_unit PROPERTIES
+        SKIP_RETURN_CODE 77)
+
+    # Sortformer on the DIARIZE role: old-vs-new segment parity, pre-clear
+    # rejection, and (with TRANSCRIBE_WHISPER_GGUF) cross-role concurrency.
+    # Gated by TRANSCRIBE_SORTFORMER_GGUF (RC 77 skip).
+    add_executable(transcribe_sortformer_diarize_unit
+        sortformer_diarize_unit.cpp)
+    target_link_libraries(transcribe_sortformer_diarize_unit
+        PRIVATE transcribe transcribe-common-example)
+    target_compile_definitions(transcribe_sortformer_diarize_unit PRIVATE
+        "TRANSCRIBE_TEST_SAMPLES_DIR=\"${CMAKE_SOURCE_DIR}/samples\"")
+    transcribe_apply_warnings(transcribe_sortformer_diarize_unit)
+    add_test(NAME transcribe_sortformer_diarize_unit
+        COMMAND transcribe_sortformer_diarize_unit)
+    set_tests_properties(transcribe_sortformer_diarize_unit PROPERTIES
         SKIP_RETURN_CODE 77)
 endif()
 
