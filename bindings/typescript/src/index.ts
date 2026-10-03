@@ -1232,10 +1232,18 @@ export class Stream {
           samples.length,
           u,
         );
-        if (status !== g.TRANSCRIBE_OK) {
-          // Native feed failures leave the stream in FAILED, which is no longer
-          // an active stream in the C API. Keep the wrapper readable for
-          // state/lastStatus, but free the model-wide compute slot.
+        // The lease follows the native stream lifecycle, so on failure ask
+        // the stream where it ended up (still inside this exclusive slot, the
+        // worker call has returned). A feed rejected before the family hook
+        // (non-finite samples, other pre-hook INVALID_ARG) leaves it ACTIVE:
+        // keep the lease, so the stream stays usable and siblings stay Busy.
+        // A hook failure moves it to FAILED, which is no longer an active
+        // stream in the C API: keep the wrapper readable for state/lastStatus,
+        // but free the model-wide compute slot.
+        if (
+          status !== g.TRANSCRIBE_OK &&
+          n.F.streamGetState(h) !== g.TRANSCRIBE_STREAM_ACTIVE
+        ) {
           this.#releaseLease();
         }
         check(n, status, "transcribe_stream_feed");

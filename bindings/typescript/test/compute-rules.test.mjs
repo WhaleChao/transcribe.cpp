@@ -8,8 +8,9 @@
 
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
+import koffi from "koffi";
 import { modelTest, MODEL, STREAMING_MODEL, jfk } from "./common.mjs";
-import { TranscribeModel, Aborted, Busy, InvalidArgument } from "../dist/index.js";
+import { TranscribeModel, Aborted, Busy, InvalidArgument, libraryPath } from "../dist/index.js";
 
 const second = () => jfk().subarray(0, 16000);
 const half = () => {
@@ -151,7 +152,7 @@ modelTest("a feed or finalize queued before session dispose still runs", STREAMI
   }
 });
 
-modelTest("a rejected feed releases the stream lease (current behavior)", STREAMING_MODEL, async () => {
+modelTest("a feed rejected before the native hook keeps the stream lease", STREAMING_MODEL, async () => {
   const m = await TranscribeModel.load(STREAMING_MODEL);
   try {
     const a = m.createSession();
@@ -160,14 +161,63 @@ modelTest("a rejected feed releases the stream lease (current behavior)", STREAM
     await stream.feed(second());
     const bad = new Float32Array(1600);
     bad[5] = Number.NaN;
+    // Native rejects non-finite samples before the family hook and leaves the
+    // stream ACTIVE, so the binding keeps the model-wide lease.
     await assert.rejects(() => stream.feed(bad), InvalidArgument);
-    // The native stream stays ACTIVE after a non-finite feed, but the binding
-    // releases the model-wide lease on any non-OK feed status, so a sibling
-    // run is no longer refused with Busy. Pinned as-is so that changing it is
-    // a deliberate, visible decision. The probe run is itself non-finite, so
-    // native rejects it up front and no compute overlaps the live stream.
     assert.equal(stream.state, "active");
-    await assert.rejects(() => b.run(bad), (e) => e instanceof InvalidArgument && !(e instanceof Busy));
+    await assert.rejects(() => b.run(second()), Busy);
+    await assert.rejects(() => b.stream(), Busy);
+    await assert.rejects(() => a.run(second()), Busy);
+
+    // The stream is still usable, and finalize releases the lease as usual.
+    const u = await stream.feed(jfk().subarray(16000, 32000));
+    assert.equal(typeof u.revision, "number");
+    const fin = await stream.finalize();
+    assert.equal(fin.isFinal, true);
+    assert.equal(stream.state, "finished");
+    const r = await b.run(second());
+    assert.equal(typeof r.text, "string");
+    stream.reset();
+    a.dispose();
+    b.dispose();
+  } finally {
+    m.dispose();
+  }
+});
+
+modelTest("a feed that fails inside the native hook releases the stream lease", STREAMING_MODEL, async () => {
+  const m = await TranscribeModel.load(STREAMING_MODEL);
+  try {
+    const a = m.createSession();
+    const b = m.createSession();
+    const stream = await a.stream({ commitPolicy: "stable_prefix" });
+    await stream.feed(second());
+
+    // Provoke a hook failure: an abort callback that always fires makes the
+    // streaming hook return ABORTED, which moves the native stream to FAILED.
+    // feed() has no signal option, so install it on the native session
+    // directly (test-only; the same library instance the binding loaded).
+    const lib = koffi.load(libraryPath());
+    const proto = koffi.proto("bool ComputeRulesTestAbortCb(void *udata)");
+    const setAbort = lib.func("transcribe_set_abort_callback", "void", [
+      "void *",
+      koffi.pointer(proto),
+      "void *",
+    ]);
+    const cb = koffi.register(() => true, koffi.pointer(proto));
+    setAbort(a.handle, cb, null);
+    try {
+      await assert.rejects(() => stream.feed(second()), Aborted);
+    } finally {
+      setAbort(a.handle, null, null);
+      koffi.unregister(cb);
+    }
+    assert.equal(stream.state, "failed");
+    assert.ok(stream.lastStatus instanceof Aborted);
+
+    // FAILED is no longer an active stream: the lease is free for a sibling.
+    const r = await b.run(second());
+    assert.equal(typeof r.text, "string");
     stream.reset();
     a.dispose();
     b.dispose();
