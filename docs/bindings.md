@@ -96,6 +96,28 @@ explicit unsupported combinations return `UNSUPPORTED_TIMESTAMPS`; `AUTO`
 chooses the richest granularity compatible with the selected task. Result
 objects own copies of every row and remain valid after the next run.
 
+That contract is for ASR models that attribute speakers inside a transcript.
+
+## Roles and the DIARIZE session
+
+Each binding exposes the role mask as `Model.roles` (Python `frozenset[Role]`,
+TypeScript `readonly ('asr' | 'diarize')[]`, Rust `Roles`, Swift `Roles`
+option set). Status 20 surfaces as `UnsupportedRole` (`.unsupportedRole` in
+Swift), including from capabilities on a model without ASR.
+
+A DIARIZE model (`docs/roles.md`) gets its own session type: `DiarizeSession`
+from `model.diarize_session()` (Python, Rust), `model.diarizeSession()`
+(Swift) or `model.createDiarizeSession()` (TypeScript), plus `diarize_info` /
+`diarizeInfo` (sample rate, max speakers). `run(pcm, …)` returns copied-out
+speaker-turn rows (the same row type as above) and takes the family's
+diarize extension (Sortformer: the preset on the `diarize_run` slot).
+
+A diarize run follows the same execution rules as an ASR run: it holds the
+model-wide compute lock, waits behind other compute on the model, raises
+`Busy` while a stream on any session of the model holds the stream lease,
+keeps its model alive, honours cancellation, and defers native frees that
+race an in-flight call.
+
 ## Raw text
 
 Every first-class binding exposes `raw_text` / `rawText` on the materialized
