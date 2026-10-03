@@ -38,3 +38,18 @@ extension Session {
         cancelToken = nil
     }
 }
+
+extension DiarizeSession {
+    /// Install a cancellation token; a cancelled run throws `.aborted`.
+    public func setCancellationToken(_ token: CancellationToken) {
+        cancelToken = token
+        let context = Unmanaged.passUnretained(token).toOpaque()
+        transcribe_diarize_set_abort_callback(ptr, abortTrampoline, context)
+    }
+
+    /// Remove any installed cancellation token.
+    public func clearCancellationToken() {
+        transcribe_diarize_set_abort_callback(ptr, nil, nil)
+        cancelToken = nil
+    }
+}

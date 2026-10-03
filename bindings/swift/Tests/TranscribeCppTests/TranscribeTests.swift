@@ -24,7 +24,7 @@ final class TranscribeTests: XCTestCase {
     func testFinerThanSupportedTimestampsIsUnsupported() throws {
         let (path, pcm) = try Fixtures.modelAndAudio()
         let model = try Model(path: path)
-        guard let finer = finerThanSupported(model.capabilities.maxTimestampKind) else {
+        guard let finer = finerThanSupported(try model.capabilities.maxTimestampKind) else {
             throw XCTSkip("model already supports the finest timestamps")
         }
         let session = try model.session()
@@ -61,7 +61,7 @@ final class TranscribeTests: XCTestCase {
         let model = try Model(path: path)
         XCTAssertFalse(model.arch.isEmpty)
         XCTAssertFalse(model.backend.isEmpty)
-        XCTAssertGreaterThan(model.capabilities.nativeSampleRate, 0)
+        XCTAssertGreaterThan(try model.capabilities.nativeSampleRate, 0)
     }
 
     func testPncChangesCanaryPrompt() throws {

@@ -6,8 +6,8 @@ import XCTest
 /// Characterization of the rules every native compute call follows today, so
 /// moving them behind one helper can be checked against the old behavior:
 ///
-/// - every compute site (run, runBatch, stream begin/feed/finalize/reset, and a
-///   dropped `Stream`'s reset) waits on the model-wide `runLock`, which all
+/// - every compute site (run, runBatch, stream begin/feed/finalize/reset, a
+///   dropped `Stream`'s reset, and a diarize run) waits on the model-wide `runLock`, which all
 ///   sessions of one model share;
 /// - run / runBatch / stream begin validate their string options BEFORE taking
 ///   the lock, and refuse an active stream with `.busy` only AFTER taking it;
@@ -135,6 +135,36 @@ final class ComputeRulesTests: XCTestCase {
         assertWaitsOnModelLock(model, "Stream deinit") { stream.value = nil }
         XCTAssertFalse(model.streamActive)
         XCTAssertEqual(try session.stream().reset(), .idle)
+    }
+
+    /// A diarize run follows the Session rules: it keeps its model alive,
+    /// waits on the model lock, and refuses a held stream lease with `.busy`
+    /// only once the lock is taken.
+    func testDiarizeRunSharesTheModelLockAndLease() throws {
+        let (path, pcm) = try Fixtures.sortformerModelAndAudio()
+        weak var weakModel: Model?
+        let session: DiarizeSession = try {
+            let model = try Model(path: path)
+            weakModel = model
+            return try model.diarizeSession()
+        }()
+        XCTAssertNotNil(weakModel, "a live DiarizeSession must keep its Model alive")
+        let model = session.model
+
+        let rows = Box<[SpeakerSegment]>()
+        assertWaitsOnModelLock(model, "diarize run") { rows.value = try? session.run(pcm) }
+        XCTAssertEqual(rows.value?.isEmpty, false)
+
+        // Sortformer cannot stream, so the lease a stream would hold is set directly.
+        model.withCompute { model.streamActive = true }
+        defer { model.withCompute { model.streamActive = false } }
+        let error = Box<Error>()
+        assertWaitsOnModelLock(model, "diarize run while streaming") {
+            do { _ = try session.run(pcm) } catch let e { error.value = e }
+        }
+        XCTAssertEqual(
+            busyMessage(error.value),
+            "a stream is active on this model; finish or drop it before diarize run()")
     }
 
     // MARK: - Active-stream rejection and its ordering

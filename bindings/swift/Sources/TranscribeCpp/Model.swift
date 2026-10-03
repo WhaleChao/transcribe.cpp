@@ -7,6 +7,15 @@ import Foundation
 /// contract — the same per-model mutex + stream lease the Rust binding uses). A
 /// `Model` outlives every `Session` derived from it; the session holds a strong
 /// reference, so close ordering is automatic under ARC.
+/// The kinds of work a model serves (`transcribe_model_roles`). ASR is
+/// `Session`; DIARIZE is `DiarizeSession`.
+public struct Roles: OptionSet, Sendable {
+    public let rawValue: UInt32
+    public init(rawValue: UInt32) { self.rawValue = rawValue }
+    public static let asr = Roles(rawValue: TRANSCRIBE_ROLE_ASR.rawValue)
+    public static let diarize = Roles(rawValue: TRANSCRIBE_ROLE_DIARIZE.rawValue)
+}
+
 public final class Model: @unchecked Sendable {
     let ptr: OpaquePointer
     /// Serializes the run/feed/finalize compute path across all sessions, and
@@ -15,7 +24,7 @@ public final class Model: @unchecked Sendable {
     /// The compute lease: `true` while some session holds an ACTIVE stream.
     /// The C contract allows at most one in-flight run/stream across ALL
     /// sessions of a model, and an active stream spans begin..finalize/reset/
-    /// drop — so `run`/`runBatch`/another `stream` are refused with `.busy`
+    /// drop — so `run`/`runBatch`/another `stream`/a diarize `run` are refused with `.busy`
     /// while it is held, rather than racing into the documented UB (corrupted
     /// decodes on CPU, command-buffer failures on Metal). Always accessed under
     /// `runLock`.
@@ -68,11 +77,18 @@ public final class Model: @unchecked Sendable {
         return Session(model: self, ptr: out)
     }
 
+    /// The roles this model serves, fixed at load.
+    public var roles: Roles { Roles(rawValue: transcribe_model_roles(ptr)) }
+
+    /// ASR capabilities. Throws `.unsupportedRole` when `roles` lacks `.asr`.
     public var capabilities: Capabilities {
-        var caps = transcribe_capabilities()
-        transcribe_capabilities_init(&caps)
-        _ = transcribe_model_get_capabilities(ptr, &caps)
-        return Capabilities(caps)
+        get throws {
+            var caps = transcribe_capabilities()
+            transcribe_capabilities_init(&caps)
+            try TranscribeError.check(
+                transcribe_model_get_capabilities(ptr, &caps), context: "capabilities")
+            return Capabilities(caps)
+        }
     }
 
     public func supports(_ feature: Feature) -> Bool {
