@@ -175,19 +175,10 @@ impl Session {
         // The compute path is serialized per model; hold the lock for the native
         // call, then materialize this session's own result storage. Refuse a run
         // that would overlap an active stream on another session (the C contract).
-        let status = {
-            let guard = self
-                .model
-                .compute_lock
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if *guard {
-                return Err(Error::Busy(
-                    "a stream is active on this model; finish or drop it before run()".into(),
-                ));
-            }
-            unsafe { sys::transcribe_run(self.ptr, pcm.as_ptr(), n, &params) }
-        };
+        let status = self.with_compute(
+            Some("a stream is active on this model; finish or drop it before run()"),
+            |ptr, _| unsafe { sys::transcribe_run(ptr, pcm.as_ptr(), n, &params) },
+        )?;
 
         match status {
             s if s == sys::transcribe_status::TRANSCRIBE_OK => Ok(self.materialize_run()),
@@ -221,19 +212,12 @@ impl Session {
             .collect::<Result<_>>()?;
         let n = clamp_len(pcms.len())?;
 
-        let status = {
-            let guard = self
-                .model
-                .compute_lock
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if *guard {
-                return Err(Error::Busy(
-                    "a stream is active on this model; finish or drop it before run_batch()".into(),
-                ));
-            }
-            unsafe { sys::transcribe_run_batch(self.ptr, ptrs.as_ptr(), lens.as_ptr(), n, &params) }
-        };
+        let status = self.with_compute(
+            Some("a stream is active on this model; finish or drop it before run_batch()"),
+            |ptr, _| unsafe {
+                sys::transcribe_run_batch(ptr, ptrs.as_ptr(), lens.as_ptr(), n, &params)
+            },
+        )?;
 
         // OK and ABORTED both populate one per-utterance slot per input; fold
         // the batch-level abort into the per-utterance view (the C contract).
@@ -293,30 +277,54 @@ impl Session {
     pub fn stream(&mut self, run: &RunOptions, stream: &StreamOptions) -> Result<Stream<'_>> {
         let (run_params, _lang, _target, _family, _prompting) = build_run_params(run)?;
         let (stream_params, _stream_family) = build_stream_params(stream);
-        {
-            // Claim the model's compute lease for the whole stream lifetime: a
-            // stream spans begin..drop, so per-call locking alone would let a
-            // second stream (or a run) on another session race it.
-            let mut guard = self
-                .model
-                .compute_lock
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            if *guard {
-                return Err(Error::Busy(
-                    "a stream is already active on this model".into(),
-                ));
-            }
-            check(
-                unsafe { sys::transcribe_stream_begin(self.ptr, &run_params, &stream_params) },
-                "stream begin",
-            )?;
-            *guard = true; // released at finalize/reset, or by Stream::drop
-        }
+        // Claim the model's compute lease for the whole stream lifetime: a
+        // stream spans begin..drop, so per-call locking alone would let a
+        // second stream (or a run) on another session race it.
+        self.with_compute(
+            Some("a stream is already active on this model"),
+            |ptr, lease| -> Result<()> {
+                check(
+                    unsafe { sys::transcribe_stream_begin(ptr, &run_params, &stream_params) },
+                    "stream begin",
+                )?;
+                *lease = true; // released at finalize/reset, or by Stream::drop
+                Ok(())
+            },
+        )??;
         Ok(Stream {
             session: self,
             holds_lease: true,
         })
+    }
+
+    /// Make one native compute call on this session under the model's compute
+    /// lock. Every call that drives native compute (run, batch, stream
+    /// begin/feed/finalize/reset/drop) goes through here.
+    ///
+    /// Under the lock, in order: if `refuse_if_streaming` is `Some(msg)` and a
+    /// stream on this model holds the lease, return `Error::Busy(msg)` without
+    /// calling `f`; otherwise call `f` with this session's native handle and
+    /// the lease flag (so a stream begin/end can take or release the lease
+    /// atomically with its native call). Pass `None` from the stream that holds
+    /// the lease; the call then never fails. The lock is released when this
+    /// returns, so callers copy results out of the session's own result
+    /// storage afterwards.
+    pub(crate) fn with_compute<R>(
+        &mut self,
+        refuse_if_streaming: Option<&str>,
+        f: impl FnOnce(*mut sys::transcribe_session, &mut bool) -> R,
+    ) -> Result<R> {
+        let mut lease = self
+            .model
+            .compute_lock
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(msg) = refuse_if_streaming {
+            if *lease {
+                return Err(Error::Busy(msg.into()));
+            }
+        }
+        Ok(f(self.ptr, &mut lease))
     }
 
     // --- result materialization (top-level / single accessors) ---------------
@@ -580,16 +588,14 @@ impl Drop for Stream<'_> {
         // state) and release the lease IF this stream still holds it — under the
         // lock. After finalize/reset the lease is already gone (and may now be
         // another session's), so only clear it when holds_lease is still true.
-        let mut guard = self
-            .session
-            .model
-            .compute_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe { sys::transcribe_stream_reset(self.session.ptr) };
-        if self.holds_lease {
-            *guard = false;
-        }
+        // (No busy check, so this cannot fail.)
+        let held = self.holds_lease;
+        let _ = self.session.with_compute(None, |ptr, lease| {
+            unsafe { sys::transcribe_stream_reset(ptr) };
+            if held {
+                *lease = false;
+            }
+        });
     }
 }
 
@@ -599,17 +605,11 @@ impl Stream<'_> {
         let n = clamp_len(pcm.len())?;
         let mut update: sys::transcribe_stream_update = unsafe { std::mem::zeroed() };
         unsafe { sys::transcribe_stream_update_init(&mut update) };
-        let status = {
-            // This stream already holds the model's compute lease (it is in
-            // flight); the lock here just serializes the native call.
-            let _guard = self
-                .session
-                .model
-                .compute_lock
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            unsafe { sys::transcribe_stream_feed(self.session.ptr, pcm.as_ptr(), n, &mut update) }
-        };
+        // This stream already holds the model's compute lease (it is in
+        // flight); the lock here just serializes the native call.
+        let status = self.session.with_compute(None, |ptr, _| unsafe {
+            sys::transcribe_stream_feed(ptr, pcm.as_ptr(), n, &mut update)
+        })?;
         check(status, "stream feed")?;
         Ok(StreamUpdate::from_raw(&update))
     }
@@ -619,22 +619,17 @@ impl Stream<'_> {
     pub fn finalize(&mut self) -> Result<StreamUpdate> {
         let mut update: sys::transcribe_stream_update = unsafe { std::mem::zeroed() };
         unsafe { sys::transcribe_stream_update_init(&mut update) };
-        let status = {
-            let mut guard = self
-                .session
-                .model
-                .compute_lock
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            let st = unsafe { sys::transcribe_stream_finalize(self.session.ptr, &mut update) };
+        let held = self.holds_lease;
+        let status = self.session.with_compute(None, |ptr, lease| {
+            let st = unsafe { sys::transcribe_stream_finalize(ptr, &mut update) };
             // Finalize ends the active stream (Finished, or Failed on error);
             // either way it is no longer active, so free the model's compute
             // lease now rather than holding other sessions off until drop.
-            if self.holds_lease {
-                *guard = false;
+            if held {
+                *lease = false;
             }
             st
-        };
+        })?;
         self.holds_lease = false;
         check(status, "stream finalize")?;
         Ok(StreamUpdate::from_raw(&update))
@@ -645,16 +640,14 @@ impl Stream<'_> {
     /// active), so other sessions of the model can proceed without waiting for
     /// this `Stream` to drop.
     pub fn reset(&mut self) {
-        let mut guard = self
-            .session
-            .model
-            .compute_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        unsafe { sys::transcribe_stream_reset(self.session.ptr) };
-        if self.holds_lease {
-            *guard = false;
-        }
+        // No busy check, so this cannot fail.
+        let held = self.holds_lease;
+        let _ = self.session.with_compute(None, |ptr, lease| {
+            unsafe { sys::transcribe_stream_reset(ptr) };
+            if held {
+                *lease = false;
+            }
+        });
         self.holds_lease = false;
     }
 

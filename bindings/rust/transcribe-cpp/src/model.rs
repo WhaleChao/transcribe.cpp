@@ -73,7 +73,8 @@ pub(crate) struct ModelInner {
     /// is `true` while a stream is ACTIVE (from `begin` until the earliest of
     /// `finalize` / `reset` / the `Stream` being dropped); a held lock plus a
     /// `true` flag is how `run`/`run_batch`/`stream` detect and refuse an
-    /// overlapping compute. See the module docs.
+    /// overlapping compute. Only taken through `Session::with_compute`. See
+    /// the module docs.
     pub(crate) compute_lock: Mutex<bool>,
 }
 
