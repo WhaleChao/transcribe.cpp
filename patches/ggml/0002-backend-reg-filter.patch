@@ -21,7 +21,7 @@ index cc3f8cd3..dd98d879 100644
      // Backend scheduler
      //
 diff --git a/src/ggml-backend-reg.cpp b/src/ggml-backend-reg.cpp
-index 1c18b82c..068bfe89 100644
+index 1c18b82c..b2a8c193 100644
 --- a/src/ggml-backend-reg.cpp
 +++ b/src/ggml-backend-reg.cpp
 @@ -3,6 +3,7 @@
@@ -74,10 +74,12 @@ index 1c18b82c..068bfe89 100644
  #ifdef GGML_USE_VULKAN
      // Add runtime disable check
 -    if (getenv("GGML_DISABLE_VULKAN") == nullptr) {
-+    if (getenv("GGML_DISABLE_VULKAN") == nullptr && reg_allowed("vulkan")) {
-         register_backend(ggml_backend_vk_reg());
-     } else {
+-        register_backend(ggml_backend_vk_reg());
+-    } else {
++    if (getenv("GGML_DISABLE_VULKAN") != nullptr) {
          GGML_LOG_DEBUG("Vulkan backend disabled by GGML_DISABLE_VULKAN environment variable\n");
++    } else if (reg_allowed("vulkan")) {
++        register_backend(ggml_backend_vk_reg());
      }
  #endif
  #ifdef GGML_USE_WEBGPU
