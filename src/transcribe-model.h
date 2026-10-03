@@ -23,10 +23,6 @@ namespace transcribe {
 struct Arch;
 class Tokenizer;
 
-// Role bits for transcribe_model::roles: the public transcribe_role values.
-constexpr uint32_t k_role_asr     = TRANSCRIBE_ROLE_ASR;
-constexpr uint32_t k_role_diarize = TRANSCRIBE_ROLE_DIARIZE;
-
 // Transparent comparator keeps transcribe_model_meta_val_str allocation-free.
 // Loader and model must use the same map type for assignment.
 using MetaMap = std::map<std::string, std::string, std::less<>>;
@@ -45,10 +41,8 @@ struct transcribe_model {
     // for per-call dispatch (init_context, run).
     const transcribe::Arch * arch = nullptr;
 
-    // Bitmask of transcribe_role this loaded model serves. Set by the
-    // family's load() when it serves anything other than ASR alone; left 0,
-    // it defaults to ASR for an arch with ASR hooks. Validated against the
-    // arch at load (transcribe::resolve_roles). Immutable after load.
+    // transcribe_role bits; set by load() (0 = ASR when the arch has ASR
+    // hooks) and validated by resolve_roles.
     uint32_t roles = 0;
 
     // Identification, both surfaced via the public string accessors.

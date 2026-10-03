@@ -36,11 +36,8 @@ int fake_max_speakers(const transcribe_model *) {
     return 3;
 }
 
-transcribe_status fake_init_session(transcribe_model *,
-                                    const transcribe_diarize_session_params *,
-                                    transcribe_diarize_session ** out) {
-    *out = new transcribe_diarize_session();
-    return TRANSCRIBE_OK;
+transcribe_diarize_session * fake_new_session() {
+    return new transcribe_diarize_session();
 }
 
 transcribe_status fake_run_validate(const transcribe_diarize_params *) {
@@ -68,7 +65,7 @@ bool fake_accepts(const transcribe_model *, transcribe_ext_slot slot, uint32_t k
     return slot == TRANSCRIBE_EXT_SLOT_DIARIZE_RUN && kind == k_fake_kind;
 }
 
-const transcribe::DiarizeOps k_ops = { fake_max_speakers, fake_init_session, fake_run_validate, fake_run };
+const transcribe::DiarizeOps k_ops = { fake_max_speakers, fake_new_session, fake_run_validate, fake_run };
 
 const transcribe::Arch k_arch = {
     /* .name             = */ "fake-diarize",
@@ -93,7 +90,7 @@ struct Fixture {
 
     Fixture() {
         model.arch  = &k_arch;
-        model.roles = transcribe::k_role_diarize;
+        model.roles = TRANSCRIBE_ROLE_DIARIZE;
         CHECK(transcribe_diarize_session_init(&model, nullptr, &session) == TRANSCRIBE_OK);
     }
 
@@ -119,7 +116,7 @@ void test_probs_to_segments() {
 void test_role_checks() {
     transcribe_model model;
     model.arch  = &k_arch;
-    model.roles = transcribe::k_role_asr;  // no DIARIZE bit
+    model.roles = TRANSCRIBE_ROLE_ASR;  // no DIARIZE bit
 
     transcribe_diarize_session * s = reinterpret_cast<transcribe_diarize_session *>(0x1);
     CHECK(transcribe_diarize_session_init(&model, nullptr, &s) == TRANSCRIBE_ERR_UNSUPPORTED_ROLE);
@@ -129,7 +126,7 @@ void test_role_checks() {
     transcribe_diarize_info_init(&info);
     CHECK(transcribe_diarize_get_info(&model, &info) == TRANSCRIBE_ERR_UNSUPPORTED_ROLE);
 
-    model.roles = transcribe::k_role_diarize;
+    model.roles = TRANSCRIBE_ROLE_DIARIZE;
     CHECK(transcribe_diarize_get_info(&model, &info) == TRANSCRIBE_OK);
     CHECK(info.sample_rate == 16000 && info.max_speakers == 3);
     CHECK(transcribe_diarize_get_info(nullptr, &info) == TRANSCRIBE_ERR_INVALID_ARG);

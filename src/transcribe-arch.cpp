@@ -125,18 +125,18 @@ transcribe_status resolve_roles(transcribe_model * model) {
     const bool   has_diarize = arch.diarize != nullptr;
 
     if (model->roles == 0 && has_asr) {
-        model->roles = k_role_asr;
+        model->roles = TRANSCRIBE_ROLE_ASR;
     }
 
-    const uint32_t known = k_role_asr | k_role_diarize;
+    const uint32_t known = TRANSCRIBE_ROLE_ASR | TRANSCRIBE_ROLE_DIARIZE;
     const char *   why   = nullptr;
     if (model->roles == 0) {
         why = "serves no role";
     } else if ((model->roles & ~known) != 0) {
         why = "sets an unknown role bit";
-    } else if ((model->roles & k_role_asr) != 0 && !has_asr) {
+    } else if ((model->roles & TRANSCRIBE_ROLE_ASR) != 0 && !has_asr) {
         why = "sets the ASR role without init_context / run hooks";
-    } else if ((model->roles & k_role_diarize) != 0 && !has_diarize) {
+    } else if ((model->roles & TRANSCRIBE_ROLE_DIARIZE) != 0 && !has_diarize) {
         why = "sets the DIARIZE role without a diarize ops table";
     }
     if (why != nullptr) {

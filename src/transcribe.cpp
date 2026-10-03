@@ -42,24 +42,18 @@
 #    include <dlfcn.h>
 #endif
 
-#include <algorithm>
 #include <atomic>
-#include <climits>
-#include <cmath>
 #include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
-#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <ios>
 #include <mutex>
-#include <new>
 #include <set>
 #include <string>
-#include <vector>
 
 using transcribe::api_guard_status;
 using transcribe::api_guard_value;
@@ -385,11 +379,7 @@ void log_msg(transcribe_log_level level, const char * fmt, ...) {
 // memory could hit the zero case); callers reach defaults via NULL only.
 
 extern "C" void transcribe_model_load_params_init(struct transcribe_model_load_params * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 // Output struct init functions
@@ -401,27 +391,15 @@ extern "C" void transcribe_model_load_params_init(struct transcribe_model_load_p
 // the accessors as a "you forgot to init the buffer" error.
 
 extern "C" void transcribe_timings_init(struct transcribe_timings * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_device_info_init(struct transcribe_device_info * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_speaker_segment_init(struct transcribe_speaker_segment * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 // Extension helpers
@@ -465,22 +443,9 @@ extern "C" bool transcribe_model_supports(const struct transcribe_model * model,
 
 namespace {
 
-// Minimum struct_size accepted on each caller-owned input/output struct.
-// Sized to the prefix the library currently relies on: any field the
-// library writes on a given call path must lie inside this prefix. New
-// fields appended at the end of the public struct without growing the
-// library-side prefix do NOT raise this value.
-#define TRANSCRIBE_FIELD_END(type, field) (offsetof(type, field) + sizeof(((type *) 0)->field))
-
 constexpr size_t k_min_model_params_size = TRANSCRIBE_FIELD_END(transcribe_model_load_params, device);
 constexpr size_t k_min_device_info_size  = TRANSCRIBE_FIELD_END(transcribe_device_info, kind);
 
-#undef TRANSCRIBE_FIELD_END
-
-// Size-aware ABI helpers (check_struct_size / check_input_struct_size /
-// copy_out_prefix) live in transcribe-abi.h so per-family public
-// accessors (arch/whisper/public.cpp) share one definition. Pull them
-// into this TU's unqualified scope so existing call sites are unchanged.
 using transcribe::check_input_struct_size;
 using transcribe::check_struct_size;
 using transcribe::copy_out_prefix;
@@ -861,11 +826,7 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
     // to the whisper .bin adapter, which validates the hparams as
     // whisper-shaped (rejecting unrelated ggml-magic files like Silero VAD).
     if (magic == 0x67676d6cu) {
-        const transcribe_status st = transcribe::whisper::load_from_bin(path, params, out_model);
-        if (st != TRANSCRIBE_OK || *out_model == nullptr) {
-            return st;
-        }
-        return transcribe::resolve_roles(*out_model);
+        return transcribe::whisper::load_from_bin(path, params, out_model);
     }
 
     // Header-only GGUF inspection. The Loader is stack-allocated; if
@@ -900,15 +861,10 @@ static transcribe_status transcribe_model_load_file_impl(const char *           
     // here instead of in every per-family handler. `variant` is owned by the
     // family (it may default it when stt.variant was absent) and stays on its
     // own accessor; this map is the generic general.* / display surface.
-    if (st != TRANSCRIBE_OK || *out_model == nullptr) {
-        return st;
+    if (st == TRANSCRIBE_OK && *out_model != nullptr) {
+        (*out_model)->meta = loader.meta();
     }
-    (*out_model)->meta = loader.meta();
-
-    // Role bits are validated against the arch here, for every family, so a
-    // model never reaches the caller with a role it cannot serve. On failure
-    // the forwarder frees the model.
-    return transcribe::resolve_roles(*out_model);
+    return st;
 }
 
 static void transcribe_model_free_impl(struct transcribe_model * model) {
@@ -1015,8 +971,10 @@ extern "C" bool transcribe_backend_available(transcribe_backend_request kind) {
 extern "C" transcribe_status transcribe_model_load_file(const char *                                path,
                                                         const struct transcribe_model_load_params * params,
                                                         struct transcribe_model **                  out_model) {
-    const transcribe_status st = api_guard_status(
-        "transcribe_model_load_file", [&] { return transcribe_model_load_file_impl(path, params, out_model); });
+    const transcribe_status st = api_guard_status("transcribe_model_load_file", [&] {
+        const transcribe_status lst = transcribe_model_load_file_impl(path, params, out_model);
+        return lst == TRANSCRIBE_OK && *out_model != nullptr ? transcribe::resolve_roles(*out_model) : lst;
+    });
     // Boundary-owned postcondition: failure => *out_model == NULL.
     if (st != TRANSCRIBE_OK && out_model != nullptr && *out_model != nullptr) {
         transcribe_model_free(*out_model);

@@ -12,8 +12,7 @@
 #include <vector>
 
 struct transcribe_diarize_session : transcribe::SessionCore {
-    std::vector<transcribe::SpeakerSegmentEntry> segments;
-    bool                                         has_result = false;
+    std::vector<transcribe::SpeakerSegmentEntry> segments;  // last successful run's rows
 };
 
 namespace transcribe {
@@ -28,10 +27,7 @@ struct DiarizeProbs {
 
 struct DiarizeOps {
     int (*max_speakers)(const transcribe_model * model);
-    // params is never NULL (the dispatcher substitutes defaults).
-    transcribe_status (*init_session)(transcribe_model *                        model,
-                                      const transcribe_diarize_session_params * params,
-                                      transcribe_diarize_session **             out);
+    transcribe_diarize_session * (*new_session)();
     // Pure pre-clear check of params->family (already kind/size-checked);
     // NULL = nothing to check.
     transcribe_status (*run_validate)(const transcribe_diarize_params * params);

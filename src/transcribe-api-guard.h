@@ -1,8 +1,7 @@
-// transcribe-api-guard.h - exception guards for public C ABI entry points.
-//
-// Shared by every public dispatcher (transcribe.cpp, transcribe-asr.cpp) so
-// the mapping from C++ exceptions to status codes lives in one place. Not
-// part of the public API.
+// transcribe-api-guard.h - exception guards for the public C ABI entry
+// points (bad_alloc -> OOM, other exceptions -> BACKEND, teardown never
+// throws). MSVC builds use /EHs so exceptions thrown by ggml C-ABI frames
+// remain catchable here. Not part of the public API.
 
 #pragma once
 
@@ -11,11 +10,6 @@
 
 #include <exception>
 #include <new>
-
-// Public C ABI entry points must not leak C++ exceptions. The guarded
-// paths below map bad_alloc to OOM, other exceptions to BACKEND, and make
-// teardown best-effort/no-throw. MSVC builds use /EHs so exceptions thrown
-// by ggml C-ABI frames remain catchable here.
 
 namespace transcribe {
 

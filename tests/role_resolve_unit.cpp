@@ -6,7 +6,6 @@
 
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 
 namespace {
 
@@ -55,16 +54,12 @@ transcribe_status resolve(const transcribe::Arch & arch, uint32_t roles, uint32_
     return st;
 }
 
-void test_asr_default() {
+void test_asr_default_and_explicit() {
     uint32_t roles = 0;
     CHECK(resolve(k_asr_arch, 0, &roles) == TRANSCRIBE_OK);
-    CHECK(roles == transcribe::k_role_asr);
-}
-
-void test_asr_explicit() {
-    uint32_t roles = 0;
-    CHECK(resolve(k_asr_arch, transcribe::k_role_asr, &roles) == TRANSCRIBE_OK);
-    CHECK(roles == transcribe::k_role_asr);
+    CHECK(roles == TRANSCRIBE_ROLE_ASR);
+    CHECK(resolve(k_asr_arch, TRANSCRIBE_ROLE_ASR, &roles) == TRANSCRIBE_OK);
+    CHECK(roles == TRANSCRIBE_ROLE_ASR);
 }
 
 void test_no_role_rejected() {
@@ -75,23 +70,22 @@ void test_no_role_rejected() {
 
 void test_unbacked_role_rejected() {
     uint32_t roles = 0;
-    CHECK(resolve(k_half_asr_arch, transcribe::k_role_asr, &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
-    CHECK(resolve(k_asr_arch, transcribe::k_role_diarize, &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
-    CHECK(resolve(k_asr_arch, transcribe::k_role_asr | transcribe::k_role_diarize, &roles) ==
-          TRANSCRIBE_ERR_NOT_IMPLEMENTED);
+    CHECK(resolve(k_half_asr_arch, TRANSCRIBE_ROLE_ASR, &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
+    CHECK(resolve(k_asr_arch, TRANSCRIBE_ROLE_DIARIZE, &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
+    CHECK(resolve(k_asr_arch, TRANSCRIBE_ROLE_ASR | TRANSCRIBE_ROLE_DIARIZE, &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
 }
 
 void test_unknown_bit_rejected() {
     uint32_t roles = 0;
-    CHECK(resolve(k_asr_arch, transcribe::k_role_asr | (1u << 31), &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
+    CHECK(resolve(k_asr_arch, TRANSCRIBE_ROLE_ASR | (1u << 31), &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
 }
 
-// D5: ASR entry points refuse a model that does not serve ASR, before
+// ASR entry points refuse a model that does not serve ASR, before
 // touching params or the arch; capabilities leave the caller's struct alone.
 void test_asr_entry_points_check_role() {
     transcribe_model model;
     model.arch  = &k_asr_arch;
-    model.roles = transcribe::k_role_diarize;  // not ASR
+    model.roles = TRANSCRIBE_ROLE_DIARIZE;  // not ASR
 
     transcribe_session * s = reinterpret_cast<transcribe_session *>(0x1);
     CHECK(transcribe_session_init(&model, nullptr, &s) == TRANSCRIBE_ERR_UNSUPPORTED_ROLE);
@@ -107,17 +101,11 @@ void test_asr_entry_points_check_role() {
 
     // Same model with the ASR bit: capabilities succeed; session_init gets
     // past the role check to the fake arch's init_context.
-    model.roles = transcribe::k_role_asr;
+    model.roles = TRANSCRIBE_ROLE_ASR;
     CHECK(transcribe_model_get_capabilities(&model, &caps) == TRANSCRIBE_OK);
     CHECK(transcribe_session_init(&model, nullptr, &s) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
     CHECK(s == nullptr);
     CHECK(transcribe_model_roles(&model) == TRANSCRIBE_ROLE_ASR);
-}
-
-void test_role_bits_match_public_enum() {
-    static_assert(transcribe::k_role_asr == TRANSCRIBE_ROLE_ASR, "internal and public role bits must match");
-    static_assert(transcribe::k_role_diarize == TRANSCRIBE_ROLE_DIARIZE, "internal and public role bits must match");
-    CHECK(std::strcmp(transcribe_status_string(TRANSCRIBE_ERR_UNSUPPORTED_ROLE), "unknown status") != 0);
 }
 
 void test_null_model() {
@@ -131,14 +119,12 @@ void test_null_model() {
 int main() {
     transcribe_log_set(nullptr, nullptr);  // the rejections log at ERROR
 
-    test_asr_default();
-    test_asr_explicit();
+    test_asr_default_and_explicit();
     test_no_role_rejected();
     test_unbacked_role_rejected();
     test_unknown_bit_rejected();
     test_null_model();
     test_asr_entry_points_check_role();
-    test_role_bits_match_public_enum();
 
     if (g_failures != 0) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);

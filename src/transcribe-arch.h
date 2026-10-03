@@ -131,8 +131,7 @@ struct Arch {
     // checks remain in force.
     transcribe_status (*run_validate)(const struct transcribe_session * ctx, const transcribe_run_params * params);
 
-    // Per-role ops tables for the non-ASR roles. nullptr = the arch does not
-    // implement the role. The ASR hooks above stay flat on the trait.
+    // Ops tables for the non-ASR roles; nullptr = role not implemented.
     const DiarizeOps * diarize;
 };
 

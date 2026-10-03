@@ -21,7 +21,6 @@
 #include "transcribe-loader.h"
 #include "transcribe-log.h"
 #include "transcribe-mel.h"
-#include "transcribe-meta.h"
 
 #include <algorithm>
 #include <cmath>
@@ -29,7 +28,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <limits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -398,8 +396,8 @@ conf::BlockView sf_block_view(const pk::ParakeetBlock & b) {
     return v;
 }
 
-// Host sinusoidal rel-pos table [pos_len, d_model] (same as the offline
-// builder in run(); factored for per-chunk reuse in the streaming path).
+// Host sinusoidal rel-pos table [pos_len, d_model], shared by the offline
+// and streaming paths.
 void fill_rel_pos_emb(std::vector<float> & buf, std::vector<float> & div_term, int pos_len, int d_model) {
     const int   zero_index = (pos_len - 1) / 2;
     const float ln_10000   = std::log(10000.0f);
@@ -612,7 +610,7 @@ transcribe_status load(Loader & loader, const transcribe_model_load_params * par
         return st;
     }
 
-    m->roles     = k_role_diarize;
+    m->roles     = TRANSCRIBE_ROLE_DIARIZE;
     m->t_load_us = ggml_time_us() - t_load_start;
     *out_model   = m.release();
     return TRANSCRIBE_OK;
@@ -1021,11 +1019,8 @@ static int diarize_max_speakers(const transcribe_model * model) {
     return static_cast<const SortformerModel *>(model)->hparams.max_speakers;
 }
 
-static transcribe_status diarize_init_session(transcribe_model *,
-                                              const transcribe_diarize_session_params *,
-                                              transcribe_diarize_session ** out) {
-    *out = new SortformerSession();
-    return TRANSCRIBE_OK;
+static transcribe_diarize_session * diarize_new_session() {
+    return new SortformerSession();
 }
 
 static transcribe_status diarize_run_validate(const transcribe_diarize_params * params) {
@@ -1055,7 +1050,7 @@ static transcribe_status diarize_run(transcribe_diarize_session *      session,
 
 static const DiarizeOps k_diarize_ops = {
     /* .max_speakers = */ diarize_max_speakers,
-    /* .init_session = */ diarize_init_session,
+    /* .new_session  = */ diarize_new_session,
     /* .run_validate = */ diarize_run_validate,
     /* .run          = */ diarize_run,
 };

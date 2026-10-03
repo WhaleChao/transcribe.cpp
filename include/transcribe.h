@@ -313,14 +313,7 @@ typedef enum {
      * the check. See docs/input-limits.md.
      */
     TRANSCRIBE_ERR_OUTPUT_REPETITION      = 19,
-    /*
-     * The model does not serve the role the call needs. Returned by
-     * transcribe_session_init / transcribe_open and
-     * transcribe_model_get_capabilities (all ASR) for a model whose
-     * transcribe_model_roles() lacks TRANSCRIBE_ROLE_ASR, and by each
-     * role's session init for a model lacking that role. Check the mask
-     * with transcribe_model_roles() first.
-     */
+    /* The model does not serve the role this call needs; see transcribe_model_roles(). */
     TRANSCRIBE_ERR_UNSUPPORTED_ROLE       = 20,
 } transcribe_status;
 

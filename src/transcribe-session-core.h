@@ -4,11 +4,11 @@
 // the thread count, the per-run ggml compute scratch, the abort callback and
 // the stage timings. transcribe_session (ASR) derives from it, and so does
 // each role's session type, so scratch release (Handy #2000), cancellation
-// and timings behave the same for every role. Families keep reaching these
-// members through their derived context (ctx->sched, ctx->poll_abort(), ...).
+// and timings behave the same for every role.
 
 #pragma once
 
+#include "transcribe-abi.h"
 #include "transcribe.h"
 
 #include <cmath>
@@ -26,10 +26,8 @@ typedef struct ggml_backend_sched * ggml_backend_sched_t;
 
 namespace transcribe {
 
-// "Who spoke when" rows (diarization). Populated only when a run
-// resolves diarize ON for a supporting family; may overlap in time.
-// t0_ms == t1_ms == 0 means the family attributes text but has no
-// timing information for the turn.
+// "Who spoke when" rows; may overlap in time. t0_ms == t1_ms == 0 means the
+// family attributes text but has no timing for the turn.
 struct SpeakerSegmentEntry {
     int64_t t0_ms      = 0;
     int64_t t1_ms      = 0;
@@ -47,19 +45,13 @@ struct SessionCore {
     // "library picks a sensible default" (matches the factory).
     int n_threads = 0;
 
-    // Per-call timings, populated by the most recent transcribe_run.
-    // Surfaced via the public transcribe_get_timings accessor; reset
-    // by transcribe_reset_timings.
+    // Stage timings of the last run (microseconds).
     int64_t t_mel_us    = 0;
     int64_t t_encode_us = 0;
     int64_t t_decode_us = 0;
 
-    // Abort / cancellation (set via transcribe_set_abort_callback).
-    // run() drivers call poll_abort() at chunk / decode-step boundaries;
-    // a callback returning true sets was_aborted and the run returns
-    // TRANSCRIBE_ERR_ABORTED with partial segments preserved. was_aborted
-    // is cleared at the top of every transcribe_run, NOT by clear_result
-    // (the partial result may be deliberately retained).
+    // Abort callback; run drivers call poll_abort() at chunk / step
+    // boundaries and return TRANSCRIBE_ERR_ABORTED when it fires.
     transcribe_abort_callback abort_cb       = nullptr;
     void *                    abort_userdata = nullptr;
     bool                      was_aborted    = false;
@@ -127,5 +119,40 @@ struct SessionCore {
     // derived members are already destroyed by then. Must not throw.
     virtual void on_scratch_released() noexcept {}
 };
+
+// Calls release_scratch on scope exit once armed, so release also happens
+// when a family hook throws and the api_guard unwinds.
+struct ScratchReleaseGuard {
+    SessionCore * session = nullptr;
+    bool          armed   = false;
+
+    ~ScratchReleaseGuard() {
+        if (armed && session != nullptr) {
+            session->release_scratch();
+        }
+    }
+};
+
+// Copy a speaker-segment row out (a zeroed row when s is NULL), after the
+// struct_size check every speaker-segment accessor shares.
+inline transcribe_status copy_out_speaker_segment(const SpeakerSegmentEntry * s, transcribe_speaker_segment * out) {
+    if (out == nullptr) {
+        return TRANSCRIBE_ERR_INVALID_ARG;
+    }
+    if (const auto st = check_struct_size(out->struct_size, TRANSCRIBE_FIELD_END(transcribe_speaker_segment, p));
+        st != TRANSCRIBE_OK) {
+        return st;
+    }
+    transcribe_speaker_segment staged{};
+    staged.struct_size = out->struct_size;
+    if (s != nullptr) {
+        staged.t0_ms      = s->t0_ms;
+        staged.t1_ms      = s->t1_ms;
+        staged.speaker_id = s->speaker_id;
+        staged.p          = s->p;
+    }
+    copy_out_prefix(out, &staged, out->struct_size, sizeof(staged));
+    return TRANSCRIBE_OK;
+}
 
 }  // namespace transcribe

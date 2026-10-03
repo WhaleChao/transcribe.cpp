@@ -88,7 +88,7 @@ TRANSCRIBE_API transcribe_status transcribe_diarize_get_segment(const struct tra
                                                                 int                                       i,
                                                                 struct transcribe_speaker_segment *       out);
 
-/* load_ms plus the last run's mel / encode time; decode_ms is 0. */
+/* load_ms plus the last run's stage times. */
 TRANSCRIBE_API transcribe_status transcribe_diarize_get_timings(const struct transcribe_diarize_session * session,
                                                                 struct transcribe_timings *               out);
 

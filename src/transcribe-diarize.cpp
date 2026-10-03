@@ -10,8 +10,6 @@
 
 #include <cmath>
 #include <cstddef>
-#include <cstring>
-#include <limits>
 
 using transcribe::api_guard_status;
 using transcribe::api_guard_void;
@@ -21,19 +19,13 @@ using transcribe::copy_out_prefix;
 
 namespace {
 
-#define TRANSCRIBE_FIELD_END(type, field) (offsetof(type, field) + sizeof(((type *) 0)->field))
 constexpr size_t k_min_info_size           = TRANSCRIBE_FIELD_END(transcribe_diarize_info, max_speakers);
 constexpr size_t k_min_session_params_size = TRANSCRIBE_FIELD_END(transcribe_diarize_session_params, n_threads);
 constexpr size_t k_min_params_size         = TRANSCRIBE_FIELD_END(transcribe_diarize_params, family);
-constexpr size_t k_min_segment_size        = TRANSCRIBE_FIELD_END(transcribe_speaker_segment, p);
 constexpr size_t k_min_timings_size        = TRANSCRIBE_FIELD_END(transcribe_timings, decode_ms);
-#undef TRANSCRIBE_FIELD_END
 
 const transcribe::DiarizeOps * diarize_ops(const transcribe_model * model) {
-    if (model == nullptr || (model->roles & transcribe::k_role_diarize) == 0) {
-        return nullptr;
-    }
-    return model->arch->diarize;  // non-null: resolve_roles checked it at load
+    return (model->roles & TRANSCRIBE_ROLE_DIARIZE) != 0 ? model->arch->diarize : nullptr;
 }
 
 }  // namespace
@@ -54,7 +46,6 @@ void transcribe::probs_to_segments(const float *                      probs,
                 row.t0_ms      = static_cast<int64_t>(std::llround(run_start * frame_ms));
                 row.t1_ms      = static_cast<int64_t>(std::llround(t * frame_ms));
                 row.speaker_id = s + 1;
-                row.p          = std::numeric_limits<float>::quiet_NaN();
                 out.push_back(row);
                 run_start = -1;
             }
@@ -63,24 +54,15 @@ void transcribe::probs_to_segments(const float *                      probs,
 }
 
 extern "C" void transcribe_diarize_info_init(struct transcribe_diarize_info * p) {
-    if (p != nullptr) {
-        std::memset(p, 0, sizeof(*p));
-        p->struct_size = sizeof(*p);
-    }
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_diarize_session_params_init(struct transcribe_diarize_session_params * p) {
-    if (p != nullptr) {
-        std::memset(p, 0, sizeof(*p));
-        p->struct_size = sizeof(*p);
-    }
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_diarize_params_init(struct transcribe_diarize_params * p) {
-    if (p != nullptr) {
-        std::memset(p, 0, sizeof(*p));
-        p->struct_size = sizeof(*p);
-    }
+    transcribe::init_sized(p);
 }
 
 static transcribe_status diarize_get_info_impl(const transcribe_model * model, transcribe_diarize_info * out) {
@@ -127,12 +109,10 @@ static transcribe_status diarize_session_init_impl(transcribe_model *           
     if (params->n_threads < 0) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
-    const transcribe_status st = ops->init_session(model, params, out);
-    if (st == TRANSCRIBE_OK) {
-        (*out)->model     = model;
-        (*out)->n_threads = params->n_threads;
-    }
-    return st;
+    *out              = ops->new_session();
+    (*out)->model     = model;
+    (*out)->n_threads = params->n_threads;
+    return TRANSCRIBE_OK;
 }
 
 static transcribe_status diarize_run_impl(transcribe_diarize_session *      session,
@@ -167,25 +147,18 @@ static transcribe_status diarize_run_impl(transcribe_diarize_session *      sess
     }
 
     session->segments.clear();
-    session->has_result  = false;
-    session->was_aborted = false;
     session->t_mel_us    = 0;
     session->t_encode_us = 0;
     session->t_decode_us = 0;
-
-    // Release the compute scratch however the run ends (Handy #2000).
-    struct ScratchRelease {
-        transcribe_diarize_session * s;
-
-        ~ScratchRelease() { s->release_scratch(); }
-    } release{ session };
+    transcribe::ScratchReleaseGuard release{ session, true };
 
     transcribe::DiarizeProbs out;
     if (const auto st = ops->run(session, pcm, n_samples, params, out); st != TRANSCRIBE_OK) {
         return st;
     }
-    transcribe::probs_to_segments(out.probs.data(), out.n_frames, out.n_speakers, out.frame_ms, session->segments);
-    session->has_result = true;
+    std::vector<transcribe::SpeakerSegmentEntry> segments;
+    transcribe::probs_to_segments(out.probs.data(), out.n_frames, out.n_speakers, out.frame_ms, segments);
+    session->segments.swap(segments);
     return TRANSCRIBE_OK;
 }
 
@@ -199,32 +172,14 @@ extern "C" void transcribe_diarize_set_abort_callback(struct transcribe_diarize_
 }
 
 extern "C" int transcribe_diarize_n_segments(const struct transcribe_diarize_session * session) {
-    if (session == nullptr || !session->has_result) {
-        return 0;
-    }
-    return static_cast<int>(session->segments.size());
+    return session != nullptr ? static_cast<int>(session->segments.size()) : 0;
 }
 
 extern "C" transcribe_status transcribe_diarize_get_segment(const struct transcribe_diarize_session * session,
                                                             int                                       i,
                                                             struct transcribe_speaker_segment *       out) {
-    if (out == nullptr) {
-        return TRANSCRIBE_ERR_INVALID_ARG;
-    }
-    if (const auto st = check_struct_size(out->struct_size, k_min_segment_size); st != TRANSCRIBE_OK) {
-        return st;
-    }
-    transcribe_speaker_segment staged{};
-    staged.struct_size = out->struct_size;
-    if (i >= 0 && i < transcribe_diarize_n_segments(session)) {
-        const auto & s    = session->segments[static_cast<size_t>(i)];
-        staged.t0_ms      = s.t0_ms;
-        staged.t1_ms      = s.t1_ms;
-        staged.speaker_id = s.speaker_id;
-        staged.p          = s.p;
-    }
-    copy_out_prefix(out, &staged, out->struct_size, sizeof(staged));
-    return TRANSCRIBE_OK;
+    const bool in_range = i >= 0 && i < transcribe_diarize_n_segments(session);
+    return transcribe::copy_out_speaker_segment(in_range ? &session->segments[static_cast<size_t>(i)] : nullptr, out);
 }
 
 extern "C" transcribe_status transcribe_diarize_get_timings(const struct transcribe_diarize_session * session,
@@ -235,13 +190,8 @@ extern "C" transcribe_status transcribe_diarize_get_timings(const struct transcr
     if (const auto st = check_struct_size(out->struct_size, k_min_timings_size); st != TRANSCRIBE_OK) {
         return st;
     }
-    transcribe_timings staged{};
-    staged.struct_size = out->struct_size;
-    staged.load_ms     = static_cast<float>(session->model->t_load_us) / 1000.0f;
-    staged.mel_ms      = static_cast<float>(session->t_mel_us) / 1000.0f;
-    staged.encode_ms   = static_cast<float>(session->t_encode_us) / 1000.0f;
-    staged.decode_ms   = static_cast<float>(session->t_decode_us) / 1000.0f;
-    copy_out_prefix(out, &staged, out->struct_size, sizeof(staged));
+    transcribe::copy_out_timings(session->model->t_load_us, session->t_mel_us, session->t_encode_us,
+                                 session->t_decode_us, out);
     return TRANSCRIBE_OK;
 }
 
@@ -256,13 +206,8 @@ extern "C" transcribe_status transcribe_diarize_get_info(const struct transcribe
 extern "C" transcribe_status transcribe_diarize_session_init(struct transcribe_model *                        model,
                                                              const struct transcribe_diarize_session_params * params,
                                                              struct transcribe_diarize_session **             out) {
-    const transcribe_status st = api_guard_status("transcribe_diarize_session_init",
-                                                  [&] { return diarize_session_init_impl(model, params, out); });
-    if (st != TRANSCRIBE_OK && out != nullptr && *out != nullptr) {
-        transcribe_diarize_session_free(*out);
-        *out = nullptr;
-    }
-    return st;
+    return api_guard_status("transcribe_diarize_session_init",
+                            [&] { return diarize_session_init_impl(model, params, out); });
 }
 
 extern "C" void transcribe_diarize_session_free(struct transcribe_diarize_session * session) {

@@ -27,21 +27,13 @@
 #include "transcribe.h"
 
 #include <algorithm>
-#include <atomic>
 #include <climits>
-#include <cmath>
-#include <cstdarg>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <exception>
-#include <filesystem>
-#include <fstream>
-#include <ios>
-#include <mutex>
 #include <new>
-#include <set>
 #include <string>
 #include <vector>
 
@@ -308,11 +300,7 @@ transcribe_status prepare_prompting(const transcribe_model * model, transcribe_r
 // See transcribe.cpp for the zero-fill + struct_size convention.
 
 extern "C" void transcribe_session_params_init(struct transcribe_session_params * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_run_params_init(struct transcribe_run_params * p) {
@@ -328,69 +316,37 @@ extern "C" void transcribe_run_params_init(struct transcribe_run_params * p) {
 }
 
 extern "C" void transcribe_stream_params_init(struct transcribe_stream_params * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 // Output struct init functions
 
 extern "C" void transcribe_capabilities_init(struct transcribe_capabilities * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_session_limits_init(struct transcribe_session_limits * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_stream_update_init(struct transcribe_stream_update * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_stream_text_init(struct transcribe_stream_text * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_segment_init(struct transcribe_segment * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_word_init(struct transcribe_word * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 extern "C" void transcribe_token_init(struct transcribe_token * p) {
-    if (p == nullptr) {
-        return;
-    }
-    std::memset(p, 0, sizeof(*p));
-    p->struct_size = sizeof(*p);
+    transcribe::init_sized(p);
 }
 
 // Whisper telemetry + run-extension init and chunk-trace accessors live in
@@ -400,13 +356,6 @@ extern "C" void transcribe_token_init(struct transcribe_token * p) {
 // itn/pnc enums.
 
 namespace {
-
-// Minimum struct_size accepted on each caller-owned input/output struct.
-// Sized to the prefix the library currently relies on: any field the
-// library writes on a given call path must lie inside this prefix. New
-// fields appended at the end of the public struct without growing the
-// library-side prefix do NOT raise this value.
-#define TRANSCRIBE_FIELD_END(type, field) (offsetof(type, field) + sizeof(((type *) 0)->field))
 
 constexpr size_t k_min_context_params_size          = TRANSCRIBE_FIELD_END(transcribe_session_params, kv_type);
 // run_params is the one 0.2.0 exception to the append-only rule: `diarize`
@@ -426,23 +375,16 @@ constexpr size_t k_stream_update_committed_changed_size =
     TRANSCRIBE_FIELD_END(transcribe_stream_update, committed_changed);
 constexpr size_t k_stream_update_tentative_changed_size =
     TRANSCRIBE_FIELD_END(transcribe_stream_update, tentative_changed);
-constexpr size_t k_min_stream_text_size     = TRANSCRIBE_FIELD_END(transcribe_stream_text, raw_tentative_start_bytes);
-constexpr size_t k_min_capabilities_size    = TRANSCRIBE_FIELD_END(transcribe_capabilities, supports_streaming);
-constexpr size_t k_min_session_limits_size  = TRANSCRIBE_FIELD_END(transcribe_session_limits, max_kv_bytes);
-constexpr size_t k_min_segment_size         = TRANSCRIBE_FIELD_END(transcribe_segment, text);
-constexpr size_t k_min_word_size            = TRANSCRIBE_FIELD_END(transcribe_word, text);
-constexpr size_t k_min_token_size           = TRANSCRIBE_FIELD_END(transcribe_token, text);
-constexpr size_t k_min_speaker_segment_size = TRANSCRIBE_FIELD_END(transcribe_speaker_segment, p);
-constexpr size_t k_min_timings_size         = TRANSCRIBE_FIELD_END(transcribe_timings, decode_ms);
+constexpr size_t k_min_stream_text_size    = TRANSCRIBE_FIELD_END(transcribe_stream_text, raw_tentative_start_bytes);
+constexpr size_t k_min_capabilities_size   = TRANSCRIBE_FIELD_END(transcribe_capabilities, supports_streaming);
+constexpr size_t k_min_session_limits_size = TRANSCRIBE_FIELD_END(transcribe_session_limits, max_kv_bytes);
+constexpr size_t k_min_segment_size        = TRANSCRIBE_FIELD_END(transcribe_segment, text);
+constexpr size_t k_min_word_size           = TRANSCRIBE_FIELD_END(transcribe_word, text);
+constexpr size_t k_min_token_size          = TRANSCRIBE_FIELD_END(transcribe_token, text);
+constexpr size_t k_min_timings_size        = TRANSCRIBE_FIELD_END(transcribe_timings, decode_ms);
 // k_min_whisper_chunk_trace_size lives in arch/whisper/public.cpp with
 // the chunk-trace accessor that uses it.
 
-#undef TRANSCRIBE_FIELD_END
-
-// Size-aware ABI helpers (check_struct_size / check_input_struct_size /
-// copy_out_prefix) live in transcribe-abi.h so per-family public
-// accessors (arch/whisper/public.cpp) share one definition. Pull them
-// into this TU's unqualified scope so existing call sites are unchanged.
 using transcribe::check_input_struct_size;
 using transcribe::check_struct_size;
 using transcribe::copy_out_prefix;
@@ -816,7 +758,7 @@ static transcribe_status transcribe_session_init_impl(struct transcribe_model * 
     if (model == nullptr) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
-    if ((model->roles & transcribe::k_role_asr) == 0) {
+    if ((model->roles & TRANSCRIBE_ROLE_ASR) == 0) {
         return TRANSCRIBE_ERR_UNSUPPORTED_ROLE;
     }
     // NULL params means "all defaults" (see transcribe_model_load_file).
@@ -971,8 +913,6 @@ extern "C" bool transcribe_was_truncated(const struct transcribe_session * sessi
 // A family stream hook that throws must still end the stream: mark it FAILED
 // with the status the api_guard will report for the exception (OOM for
 // bad_alloc, BACKEND otherwise), then let the exception reach the guard.
-// Without this a throwing hook left the stream ACTIVE while the caller got
-// an error.
 template <typename Fn> static transcribe_status call_stream_hook(transcribe_session * session, Fn && hook) {
     try {
         return hook();
@@ -1375,26 +1315,6 @@ extern "C" transcribe_status transcribe_stream_get_text(const struct transcribe_
     return TRANSCRIBE_OK;
 }
 
-// Scope guard that calls transcribe_session::release_scratch on exit once
-// armed. Both offline entry points use it so release also happens when a
-// family hook throws and the api_guard unwinds the stack, including the path
-// where memory pressure matters most. release_scratch is noexcept, so running
-// it during unwinding is safe.
-namespace {
-
-struct scratch_release_guard {
-    transcribe_session * session = nullptr;
-    bool                 armed   = false;
-
-    ~scratch_release_guard() {
-        if (armed && session != nullptr) {
-            session->release_scratch();
-        }
-    }
-};
-
-}  // namespace
-
 // Shared one-utterance run body. Does NOT touch session->batch_results, so
 // the batch dispatcher can call it once per utterance inside a loop without
 // erasing already-accumulated entries; the public transcribe_run wrapper
@@ -1425,9 +1345,6 @@ static transcribe_status run_one_inner(struct transcribe_session *          sess
     // There is no meaningful "transcribe zero samples" operation; a
     // zero-length batch is treated as a caller error, not an empty run.
     if (n_samples <= 0) {
-        return TRANSCRIBE_ERR_INVALID_ARG;
-    }
-    if (!pcm_is_finite(pcm, n_samples)) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
     // NULL params means "all defaults" (transcribe vs translate, no
@@ -1567,8 +1484,7 @@ static transcribe_status transcribe_run_impl(struct transcribe_session *        
     // call must not touch the session at all — the API smoke test probes
     // this with a fake (session *)0x1 and a NULL pcm / non-positive
     // n_samples, expecting INVALID_ARG with no dereference.
-    // Non-finite PCM is malformed too: reject it here, before batch_results
-    // is touched (run_one_inner repeats the check for the batch fallback).
+    // Non-finite PCM is malformed: reject before batch_results is touched.
     if (pcm != nullptr && n_samples > 0 && !pcm_is_finite(pcm, n_samples)) {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
@@ -1578,7 +1494,7 @@ static transcribe_status transcribe_run_impl(struct transcribe_session *        
     // run_one_inner arms the guard at its commit point, so a pre-clear
     // rejection never releases and everything after (family error, abort,
     // throw) always does.
-    scratch_release_guard scratch_release;
+    transcribe::ScratchReleaseGuard scratch_release;
     scratch_release.session = session;
     return run_one_inner(session, pcm, n_samples, params, &scratch_release.armed);
 }
@@ -1718,7 +1634,7 @@ static transcribe_status transcribe_run_batch_impl(struct transcribe_session *  
     // Release the compute scratch once the batch has run, whichever path it
     // took (see transcribe_session::release_scratch). Once per call, not per
     // utterance, so the serial fallback keeps its workspace across the loop.
-    scratch_release_guard scratch_release;
+    transcribe::ScratchReleaseGuard scratch_release;
     scratch_release.session = session;
     scratch_release.armed   = true;
 
@@ -1775,7 +1691,7 @@ extern "C" transcribe_status transcribe_model_get_capabilities(const struct tran
     }
     // These are ASR capabilities: a model without the ASR role gets an
     // error, not a zeroed struct that reads as "supports nothing".
-    if ((model->roles & transcribe::k_role_asr) == 0) {
+    if ((model->roles & TRANSCRIBE_ROLE_ASR) == 0) {
         return TRANSCRIBE_ERR_UNSUPPORTED_ROLE;
     }
     // Preserve the caller-declared size, then write only the prefix
@@ -1908,16 +1824,8 @@ extern "C" transcribe_status transcribe_get_timings(const struct transcribe_sess
     if (const auto st = check_struct_size(out_timings->struct_size, k_min_timings_size); st != TRANSCRIBE_OK) {
         return st;
     }
-    const uint64_t     caller_size = out_timings->struct_size;
-    transcribe_timings staged{};
-    staged.struct_size = caller_size;
-    if (session->model != nullptr) {
-        staged.load_ms = static_cast<float>(session->model->t_load_us) / 1000.0f;
-    }
-    staged.mel_ms    = static_cast<float>(session->t_mel_us) / 1000.0f;
-    staged.encode_ms = static_cast<float>(session->t_encode_us) / 1000.0f;
-    staged.decode_ms = static_cast<float>(session->t_decode_us) / 1000.0f;
-    copy_out_prefix(out_timings, &staged, caller_size, sizeof(staged));
+    transcribe::copy_out_timings(session->model != nullptr ? session->model->t_load_us : 0, session->t_mel_us,
+                                 session->t_encode_us, session->t_decode_us, out_timings);
     return TRANSCRIBE_OK;
 }
 
@@ -2120,29 +2028,10 @@ extern "C" transcribe_status transcribe_get_token(const struct transcribe_sessio
 extern "C" transcribe_status transcribe_get_speaker_segment(const struct transcribe_session *   session,
                                                             int                                 i,
                                                             struct transcribe_speaker_segment * out) {
-    if (out == nullptr) {
-        return TRANSCRIBE_ERR_INVALID_ARG;
-    }
-    if (const auto st = check_struct_size(out->struct_size, k_min_speaker_segment_size); st != TRANSCRIBE_OK) {
-        return st;
-    }
-    const uint64_t             caller_size = out->struct_size;
-    transcribe_speaker_segment zero{};
-    zero.struct_size = caller_size;
-    copy_out_prefix(out, &zero, caller_size, sizeof(zero));
-    if (session == nullptr || !session->has_result || i < 0 ||
-        static_cast<size_t>(i) >= session->speaker_segments.size()) {
-        return TRANSCRIBE_OK;
-    }
-    const auto &               s = session->speaker_segments[static_cast<size_t>(i)];
-    transcribe_speaker_segment staged{};
-    staged.struct_size = caller_size;
-    staged.t0_ms       = s.t0_ms;
-    staged.t1_ms       = s.t1_ms;
-    staged.speaker_id  = s.speaker_id;
-    staged.p           = s.p;
-    copy_out_prefix(out, &staged, caller_size, sizeof(staged));
-    return TRANSCRIBE_OK;
+    const bool in_range = session != nullptr && session->has_result && i >= 0 &&
+                          static_cast<size_t>(i) < session->speaker_segments.size();
+    return transcribe::copy_out_speaker_segment(in_range ? &session->speaker_segments[static_cast<size_t>(i)] : nullptr,
+                                                out);
 }
 
 // Batch result accessors
@@ -2379,29 +2268,10 @@ extern "C" transcribe_status transcribe_batch_get_speaker_segment(const struct t
                                                                   int                                 i,
                                                                   int                                 j,
                                                                   struct transcribe_speaker_segment * out) {
-    if (out == nullptr) {
-        return TRANSCRIBE_ERR_INVALID_ARG;
-    }
-    if (const auto st = check_struct_size(out->struct_size, k_min_speaker_segment_size); st != TRANSCRIBE_OK) {
-        return st;
-    }
-    const uint64_t             caller_size = out->struct_size;
-    transcribe_speaker_segment zero{};
-    zero.struct_size = caller_size;
-    copy_out_prefix(out, &zero, caller_size, sizeof(zero));
-    const BatchResultView v = batch_result_view(session, i);
-    if (!v.valid || j < 0 || static_cast<size_t>(j) >= v.speaker_segments->size()) {
-        return TRANSCRIBE_OK;
-    }
-    const auto &               s = (*v.speaker_segments)[static_cast<size_t>(j)];
-    transcribe_speaker_segment staged{};
-    staged.struct_size = caller_size;
-    staged.t0_ms       = s.t0_ms;
-    staged.t1_ms       = s.t1_ms;
-    staged.speaker_id  = s.speaker_id;
-    staged.p           = s.p;
-    copy_out_prefix(out, &staged, caller_size, sizeof(staged));
-    return TRANSCRIBE_OK;
+    const BatchResultView v        = batch_result_view(session, i);
+    const bool            in_range = v.valid && j >= 0 && static_cast<size_t>(j) < v.speaker_segments->size();
+    return transcribe::copy_out_speaker_segment(in_range ? &(*v.speaker_segments)[static_cast<size_t>(j)] : nullptr,
+                                                out);
 }
 
 extern "C" transcribe_status transcribe_batch_get_timings(const struct transcribe_session * session,
@@ -2429,16 +2299,8 @@ extern "C" transcribe_status transcribe_batch_get_timings(const struct transcrib
     } else {
         return TRANSCRIBE_ERR_INVALID_ARG;
     }
-    const uint64_t     caller_size = out->struct_size;
-    transcribe_timings staged{};
-    staged.struct_size = caller_size;
-    if (session->model != nullptr) {
-        staged.load_ms = static_cast<float>(session->model->t_load_us) / 1000.0f;
-    }
-    staged.mel_ms    = static_cast<float>(mel_us) / 1000.0f;
-    staged.encode_ms = static_cast<float>(enc_us) / 1000.0f;
-    staged.decode_ms = static_cast<float>(dec_us) / 1000.0f;
-    copy_out_prefix(out, &staged, caller_size, sizeof(staged));
+    transcribe::copy_out_timings(session->model != nullptr ? session->model->t_load_us : 0, mel_us, enc_us, dec_us,
+                                 out);
     return TRANSCRIBE_OK;
 }
 

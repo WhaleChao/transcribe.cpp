@@ -13,6 +13,10 @@
 #include <cstddef>
 #include <cstring>
 
+// End offset of `field`: the minimum struct_size accepted for a caller-owned
+// struct is the prefix through the last field the library reads or writes.
+#define TRANSCRIBE_FIELD_END(type, field) (offsetof(type, field) + sizeof(((type *) 0)->field))
+
 namespace transcribe {
 
 // Raw enum reads at the public ABI boundary
@@ -32,11 +36,8 @@ inline int enum_field_raw(const void * field) {
 static_assert(sizeof(transcribe_backend_request) == sizeof(int),
               "public enums must be int-sized for raw boundary reads");
 
-// Every PCM entry point rejects non-finite samples (NaN / +-Inf) with
-// TRANSCRIBE_ERR_INVALID_ARG before it modifies any result or stream state:
-// a NaN would otherwise flow through the front end and come out as a
-// confident-looking result. Silence is valid input. O(n), negligible next to
-// any encoder.
+// Rejects NaN / +-Inf; every PCM entry point checks this before touching
+// result or stream state.
 inline bool pcm_is_finite(const float * pcm, int n_samples) {
     for (int i = 0; i < n_samples; ++i) {
         if (!std::isfinite(pcm[i])) {
@@ -74,6 +75,30 @@ inline void copy_out_prefix(void * dst, const void * src, uint64_t caller_size, 
     const uint64_t lib = static_cast<uint64_t>(library_size);
     const uint64_t n   = caller_size < lib ? caller_size : lib;
     std::memcpy(dst, src, static_cast<size_t>(n));
+}
+
+// The body of every public *_init(): zero-fill, then stamp struct_size.
+template <typename T> inline void init_sized(T * p) {
+    if (p != nullptr) {
+        std::memset(p, 0, sizeof(*p));
+        p->struct_size = sizeof(*p);
+    }
+}
+
+// Copy stage times (microseconds) out as transcribe_timings (milliseconds);
+// out->struct_size is already checked.
+inline void copy_out_timings(int64_t                     load_us,
+                             int64_t                     mel_us,
+                             int64_t                     encode_us,
+                             int64_t                     decode_us,
+                             struct transcribe_timings * out) {
+    transcribe_timings staged{};
+    staged.struct_size = out->struct_size;
+    staged.load_ms     = static_cast<float>(load_us) / 1000.0f;
+    staged.mel_ms      = static_cast<float>(mel_us) / 1000.0f;
+    staged.encode_ms   = static_cast<float>(encode_us) / 1000.0f;
+    staged.decode_ms   = static_cast<float>(decode_us) / 1000.0f;
+    copy_out_prefix(out, &staged, out->struct_size, sizeof(staged));
 }
 
 }  // namespace transcribe
