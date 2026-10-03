@@ -100,7 +100,7 @@ public final class Stream {
     /// True while this stream holds the model's compute lease (set at begin,
     /// cleared at finalize/reset/deinit). Tracked per-stream so `deinit` never
     /// releases a lease a *different* session has since acquired — mirrors the
-    /// Rust binding's `holds_lease`. Mutated only under `model.runLock`; the
+    /// Rust binding's `holds_lease`. Mutated only inside `model.withCompute`; the
     /// `deinit` guard reads it on the deallocating thread, where no other
     /// reference to this `Stream` can exist (so no concurrent mutation).
     var holdsLease = true
@@ -113,23 +113,23 @@ public final class Stream {
     /// forever. Reset is idempotent and safe from any state.
     deinit {
         guard holdsLease else { return }
-        session.model.runLock.lock()
-        transcribe_stream_reset(session.ptr)
-        session.model.streamActive = false
-        session.model.runLock.unlock()
+        session.model.withCompute {
+            transcribe_stream_reset(session.ptr)
+            session.model.streamActive = false
+        }
     }
 
     /// Feed a PCM frame (16 kHz mono float32). Returns per-call change metadata.
     public func feed(_ frame: [Float]) throws -> StreamUpdate {
-        session.model.runLock.lock()
-        defer { session.model.runLock.unlock() }
-        var update = transcribe_stream_update()
-        transcribe_stream_update_init(&update)
-        let status = frame.withUnsafeBufferPointer {
-            transcribe_stream_feed(session.ptr, $0.baseAddress, Int32($0.count), &update)
+        try session.model.withCompute {
+            var update = transcribe_stream_update()
+            transcribe_stream_update_init(&update)
+            let status = frame.withUnsafeBufferPointer {
+                transcribe_stream_feed(session.ptr, $0.baseAddress, Int32($0.count), &update)
+            }
+            try TranscribeError.check(status, context: "stream_feed")
+            return StreamUpdate(update)
         }
-        try TranscribeError.check(status, context: "stream_feed")
-        return StreamUpdate(update)
     }
 
     /// Signal end of input; flushes buffered audio and emits remaining text.
@@ -138,24 +138,24 @@ public final class Stream {
     /// proceed without waiting for this `Stream` to drop.
     @discardableResult
     public func finalize() throws -> StreamUpdate {
-        session.model.runLock.lock()
-        defer { session.model.runLock.unlock() }
-        var update = transcribe_stream_update()
-        transcribe_stream_update_init(&update)
-        let status = transcribe_stream_finalize(session.ptr, &update)
-        if holdsLease { session.model.streamActive = false; holdsLease = false }
-        try TranscribeError.check(status, context: "stream_finalize")
-        return StreamUpdate(update)
+        try session.model.withCompute {
+            var update = transcribe_stream_update()
+            transcribe_stream_update_init(&update)
+            let status = transcribe_stream_finalize(session.ptr, &update)
+            if holdsLease { session.model.streamActive = false; holdsLease = false }
+            try TranscribeError.check(status, context: "stream_finalize")
+            return StreamUpdate(update)
+        }
     }
 
     /// Abandon the stream and return the session to idle. Releases the model's
     /// compute lease (the stream is no longer active).
     @discardableResult
     public func reset() -> StreamState {
-        session.model.runLock.lock()
-        transcribe_stream_reset(session.ptr)
-        if holdsLease { session.model.streamActive = false; holdsLease = false }
-        session.model.runLock.unlock()
+        session.model.withCompute {
+            transcribe_stream_reset(session.ptr)
+            if holdsLease { session.model.streamActive = false; holdsLease = false }
+        }
         return state
     }
 
@@ -192,18 +192,18 @@ extension Session {
         _ runOptions: RunOptions = .init(), _ streamOptions: StreamOptions = .init()
     ) throws -> Stream {
         try runOptions.checkCStrings()
-        model.runLock.lock()
-        defer { model.runLock.unlock() }
-        if model.streamActive {
-            throw TranscribeError.busy("a stream is already active on this model")
-        }
-        let status = runOptions.withCParams { runParams in
-            streamOptions.withCParams { streamParams in
-                transcribe_stream_begin(ptr, runParams, streamParams)
+        return try model.withCompute {
+            if model.streamActive {
+                throw TranscribeError.busy("a stream is already active on this model")
             }
+            let status = runOptions.withCParams { runParams in
+                streamOptions.withCParams { streamParams in
+                    transcribe_stream_begin(ptr, runParams, streamParams)
+                }
+            }
+            try TranscribeError.check(status, context: "stream_begin")
+            model.streamActive = true
+            return Stream(self)
         }
-        try TranscribeError.check(status, context: "stream_begin")
-        model.streamActive = true
-        return Stream(self)
     }
 }

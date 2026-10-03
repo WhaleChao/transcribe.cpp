@@ -10,7 +10,7 @@ import Foundation
 public final class Model: @unchecked Sendable {
     let ptr: OpaquePointer
     /// Serializes the run/feed/finalize compute path across all sessions, and
-    /// guards `streamActive`.
+    /// guards `streamActive`. Taken only through `withCompute`.
     let runLock = NSLock()
     /// The compute lease: `true` while some session holds an ACTIVE stream.
     /// The C contract allows at most one in-flight run/stream across ALL
@@ -20,6 +20,19 @@ public final class Model: @unchecked Sendable {
     /// decodes on CPU, command-buffer failures on Metal). Always accessed under
     /// `runLock`.
     var streamActive = false
+
+    /// Run `body` holding this model's compute lock. Every native call that
+    /// computes or mutates a session's results goes through here, so all
+    /// sessions of one model share the C "one in-flight compute per model"
+    /// exclusion. `body` also copies results into owned Swift values before
+    /// the lock is released, and may read or change `streamActive`. Argument
+    /// checks that must not wait on the lock stay before the call; the
+    /// `streamActive` refusal, where a site has one, is `body`'s first step.
+    func withCompute<R>(_ body: () throws -> R) rethrows -> R {
+        runLock.lock()
+        defer { runLock.unlock() }
+        return try body()
+    }
 
     /// Load a model from a GGUF file. Runs the pre-1.0 version gate first.
     public init(path: String, options: ModelOptions = .init()) throws {
