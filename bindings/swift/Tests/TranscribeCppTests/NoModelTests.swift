@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import CTranscribe
 
 @testable import TranscribeCpp
 
@@ -46,6 +47,68 @@ final class NoModelTests: XCTestCase {
         XCTAssertFalse(TranscribeError.inputTooLong("").isTruncated)
         XCTAssertNil(TranscribeError.outputRepetition(message: "", partial: nil).partial)
         XCTAssertNil(TranscribeError.inputTooLong("").partial)
+    }
+
+    // No loadable model lacks the ASR role yet, so the mapping is checked
+    // directly rather than through a native call.
+    func testUnsupportedRoleMapsToItsOwnCase() {
+        XCTAssertNotEqual(Transcribe.statusString(20), "unknown status")
+        let error = TranscribeError.make(TRANSCRIBE_ERR_UNSUPPORTED_ROLE, context: "creating session")
+        guard case .unsupportedRole(let message) = error else {
+            return XCTFail("expected .unsupportedRole, got \(error)")
+        }
+        XCTAssertEqual(message, "creating session: \(Transcribe.statusString(20))")
+        XCTAssertNil(error.partial)
+        XCTAssertFalse(error.isTruncated)
+        XCTAssertThrowsError(try TranscribeError.check(TRANSCRIBE_ERR_UNSUPPORTED_ROLE)) { thrown in
+            guard case TranscribeError.unsupportedRole = thrown else {
+                return XCTFail("expected .unsupportedRole, got \(thrown)")
+            }
+        }
+    }
+
+    // Every native status maps to its case. `label` has no `default`, so a new
+    // TranscribeError case does not compile until this table is updated; the
+    // "unknown status" check below flags a newly appended C status.
+    func testEveryStatusMapsToItsCase() {
+        let expected: [Int32: String] = [
+            1: "invalidArgument", 2: "notImplemented", 3: "modelFileNotFound",
+            4: "modelLoad", 5: "modelLoad", 6: "modelLoad", 7: "outOfMemory",
+            8: "backend",
+            9: "other",  // SAMPLE_RATE: reserved, never returned; not mapped
+            10: "unsupported", 11: "unsupported", 12: "unsupported",
+            13: "aborted", 14: "badStructSize", 15: "unsupported",
+            16: "unsupported", 17: "inputTooLong", 18: "outputTruncated",
+            19: "outputRepetition", 20: "unsupportedRole",
+        ]
+        for raw in 1...20 {
+            let status = transcribe_status(rawValue: UInt32(raw))
+            XCTAssertNotEqual(Transcribe.statusString(Int32(raw)), "unknown status", "status \(raw)")
+            XCTAssertEqual(label(TranscribeError.make(status)), expected[Int32(raw)], "status \(raw)")
+        }
+        XCTAssertEqual(Transcribe.statusString(21), "unknown status",
+                       "a new status was appended; map it in TranscribeError.make")
+    }
+
+    private func label(_ error: TranscribeError) -> String {
+        switch error {
+        case .invalidArgument: return "invalidArgument"
+        case .notImplemented: return "notImplemented"
+        case .modelFileNotFound: return "modelFileNotFound"
+        case .modelLoad: return "modelLoad"
+        case .outOfMemory: return "outOfMemory"
+        case .backend: return "backend"
+        case .unsupported: return "unsupported"
+        case .badStructSize: return "badStructSize"
+        case .inputTooLong: return "inputTooLong"
+        case .aborted: return "aborted"
+        case .outputTruncated: return "outputTruncated"
+        case .outputRepetition: return "outputRepetition"
+        case .unsupportedRole: return "unsupportedRole"
+        case .versionMismatch: return "versionMismatch"
+        case .busy: return "busy"
+        case .other: return "other"
+        }
     }
 
     func testAtLeastOneDevice() {

@@ -28,6 +28,11 @@ public enum TranscribeError: Error {
     /// The decode was stopped because the output began repeating itself; the
     /// repeats are dropped from `partial`, which is incomplete.
     case outputRepetition(message: String, partial: Transcript?)
+    /// The model does not serve the role the call needs
+    /// (`TRANSCRIBE_ERR_UNSUPPORTED_ROLE`); e.g. creating an ASR session on a
+    /// model whose roles lack ASR. A model-level refusal, distinct from
+    /// `.unsupported` (a per-run option the model can't honor).
+    case unsupportedRole(String)
     case versionMismatch(String)
     case busy(String)
     case other(status: Int32, message: String)
@@ -69,6 +74,8 @@ public enum TranscribeError: Error {
             return .outputTruncated(message: message, partial: nil)
         case TRANSCRIBE_ERR_OUTPUT_REPETITION:
             return .outputRepetition(message: message, partial: nil)
+        case TRANSCRIBE_ERR_UNSUPPORTED_ROLE:
+            return .unsupportedRole(message)
         default:
             return .other(status: raw, message: message)
         }
