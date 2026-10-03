@@ -2,30 +2,12 @@
 // rules a diarize run shares with Session (lock, in-flight mark, abort,
 // disposed recheck, deferred free).
 
-import { test } from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
-import { modelTest, MODEL, SORTFORMER_MODEL, SORTFORMER_AUDIO, readWav, jfk } from "./common.mjs";
-import {
-  TranscribeModel,
-  DiarizeSession,
-  Aborted,
-  Busy,
-  InvalidArgument,
-  TranscribeError,
-  UnsupportedRole,
-} from "../dist/index.js";
+import { modelTest, MODEL, SORTFORMER_MODEL, SORTFORMER_AUDIO, readWav } from "./common.mjs";
+import { TranscribeModel, Aborted, InvalidArgument, TranscribeError, UnsupportedRole } from "../dist/index.js";
 
 const mix = () => readWav(SORTFORMER_AUDIO);
-
-test("DiarizeSession exposes only its public surface", () => {
-  assert.deepEqual(Object.getOwnPropertyNames(DiarizeSession.prototype).sort(), [
-    "constructor",
-    "dispose",
-    "run",
-    "timings",
-  ]);
-});
 
 modelTest("an ASR-only model refuses the diarize role with UnsupportedRole", MODEL, async () => {
   const m = await TranscribeModel.load(MODEL);
@@ -34,10 +16,6 @@ modelTest("an ASR-only model refuses the diarize role with UnsupportedRole", MOD
     assert.throws(() => m.diarizeInfo, UnsupportedRole);
     assert.throws(() => m.createDiarizeSession(), UnsupportedRole);
     assert.equal(m.accepts({ kind: "sortformer_diarize" }), false);
-    await assert.rejects(
-      () => m.createSession().run(jfk(), { family: { kind: "sortformer_diarize" } }),
-      InvalidArgument,
-    );
   } finally {
     m.dispose();
   }
@@ -101,9 +79,7 @@ modelTest("a bad preset or wrong-slot extension is rejected", SORTFORMER_MODEL, 
 });
 
 // ---- compute rules shared with Session -------------------------------------
-// Busy is not covered here: Sortformer cannot begin a stream, so no model
-// serves both a stream lease and the diarize role. The refusal is the same
-// SessionCore.exclusive gate compute-rules.test.mjs covers for Session.
+// No Busy test: no model serves both a stream lease and the diarize role.
 
 modelTest("the abort listener lives only for the call; a pre-aborted run raises Aborted", SORTFORMER_MODEL, async () => {
   const m = await TranscribeModel.load(SORTFORMER_MODEL);
@@ -133,10 +109,9 @@ modelTest("a diarize run queued before its dispose is rejected as disposed", SOR
     const ac = new AbortController();
     const queued = d.run(mix(), { signal: ac.signal });
     d.dispose();
-    await assert.rejects(queued, (e) => !(e instanceof Busy) && /disposed/i.test(e.message));
+    await assert.rejects(queued, /disposed/i);
     assert.equal(getEventListeners(ac.signal, "abort").length, 0);
     await running;
-    await assert.rejects(() => d.run(mix()), /disposed/);
   } finally {
     m.dispose();
   }

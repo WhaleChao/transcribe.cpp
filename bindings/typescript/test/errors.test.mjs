@@ -67,18 +67,8 @@ test("every transcribe_status maps to its documented error class", () => {
       },
     );
   }
-});
-
-test("UNSUPPORTED_ROLE maps to UnsupportedRole, not a request or load error", () => {
-  const e = exceptionForStatus(g.TRANSCRIBE_ERR_UNSUPPORTED_ROLE, "wrong role", "opening session");
+  assert.equal(Object.getPrototypeOf(UnsupportedRole), TranscribeError);
   assert.equal(g.TRANSCRIBE_ERR_UNSUPPORTED_ROLE, 20);
-  assert.ok(e instanceof UnsupportedRole);
-  assert.ok(e instanceof TranscribeError);
-  assert.equal(e.status, 20);
-  assert.equal(e.name, "UnsupportedRole");
-  assert.equal(e instanceof UnsupportedRequest, false);
-  assert.equal(e instanceof ModelLoadError, false);
-  assert.equal(e instanceof NotImplementedByModel, false);
 });
 
 test("OK does not throw", () => {

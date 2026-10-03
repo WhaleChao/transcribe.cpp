@@ -111,11 +111,8 @@ model.accepts({ kind: "whisper" }); // does this model take that extension?
 
 ### Diarization (DIARIZE role)
 
-`model.roles` lists what a model serves (`"asr"`, `"diarize"`). A diarization
-model (e.g. Sortformer, which serves only `"diarize"`) answers who spoke when;
-ASR calls (`capabilities`, `createSession`, `transcribe`, ...) on a model
-without `"asr"`, and diarize calls on one without `"diarize"`, throw
-`UnsupportedRole`.
+`model.roles` lists what a model serves (`"asr"`, `"diarize"`; Sortformer is
+diarize-only). Calls for a role the model lacks throw `UnsupportedRole`.
 
 ```ts
 const { sampleRate, maxSpeakers } = model.diarizeInfo;
@@ -126,9 +123,8 @@ const turns = await diarizer.run(pcm, {
 for (const t of turns) console.log(t.speakerId, t.t0Ms, t.t1Ms);
 ```
 
-`run` takes a `signal` like `Session.run`, and `diarizer.timings` reports the
-last run. A diarize run is a compute like any other: it shares the model's
-one-at-a-time rule and `Busy` refusal below.
+`run` takes a `signal` like `Session.run`; `diarizer.timings` reports the last
+run. Diarize runs share the model's one-at-a-time rule and `Busy` refusal below.
 
 ### Resource management
 
@@ -173,23 +169,22 @@ event loop stays responsive while inference runs.
 The C library allows **one compute in flight per model** — a `run`, a `runBatch`,
 a diarize `run`, or an *active stream* — across all of its sessions. The binding
 enforces this: every compute call serializes through an internal model-wide
-mutex, and an active
-stream holds a model-wide lease for its whole lifetime. While a stream is active
-(after `stream()`, before `finalize()`/`reset()`), a `run`/`runBatch`/`stream` on
-any session of that model is refused with a `Busy` error rather than allowed to
-race. So to parallelize, load one model per worker; to share a model, finalize or
-reset the stream first. A single `Session` is single-use-at-a-time — don't call
-`run`/`feed` on the same session concurrently.
+mutex, and an active stream holds a model-wide lease for its whole lifetime.
+While a stream is active (after `stream()`, before `finalize()`/`reset()`), a
+`run`/`runBatch`/`stream` on any session of that model is refused with a `Busy`
+error rather than allowed to race. So to parallelize, load one model per worker;
+to share a model, finalize or reset the stream first. A single `Session` is
+single-use-at-a-time — don't call `run`/`feed` on the same session concurrently.
 
 Hand-offs are ordered, not racy: `finalize()`/`reset()`/`dispose()` release the
 lease only after the native teardown runs on the shared queue, so the slot is
 never freed early. Issue the teardown before the next `stream()`/`run()` and it
 is correctly serialized — `stream.reset(); const next = await session.stream()`
 works without awaiting the (void) `reset()`. The reverse order — beginning before
-the teardown — is refused with `Busy`, by design. A rejected `feed()` follows the
-stream's state: input refused up front (e.g. NaN/Inf samples) leaves the stream
-`"active"` and the lease held, so you can keep feeding; a failure inside the
-model moves it to `"failed"` and frees the lease.
+the teardown — is refused with `Busy`, by design.
+
+A `feed()` rejected up front (e.g. NaN samples) leaves the stream `"active"` and
+the lease held; a failure inside the model makes it `"failed"` and frees the lease.
 
 Because the compute is genuinely on another thread, **do not touch a session
 while a call against it is in flight** — it is single-threaded in the C library:

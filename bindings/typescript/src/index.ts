@@ -640,13 +640,12 @@ const FAMILY: Record<string, FamilyReg> = {
     kind: g.TRANSCRIBE_EXT_KIND_SORTFORMER_DIARIZE,
     type: "transcribe_sortformer_diarize_ext",
     init: "sortformerDiarizeExtInit",
-    map: (o) => sortformerPreset(o),
+    map: (o) => ({
+      preset:
+        o.preset === undefined ? undefined : lookup(SORTFORMER_PRESET, o.preset, "sortformer preset"),
+    }),
   },
 };
-
-const sortformerPreset = (o: any) => ({
-  preset: o.preset === undefined ? undefined : lookup(SORTFORMER_PRESET, o.preset, "sortformer preset"),
-});
 
 const SORTFORMER_PRESET: Record<string, number> = {
   default: g.TRANSCRIBE_SORTFORMER_PRESET_DEFAULT,
@@ -737,40 +736,19 @@ const STREAM_TEARDOWN = new WeakMap<
 >();
 
 /**
- * How Session.#exclusive admits a compute call once it holds the model lock.
- * The checks run in field order: disposal, then the stream lease.
+ * Makes one worker call `fn(...args)` with `signal`'s abort callback installed
+ * and the session marked in flight as `kind` (result reads fail fast) until it
+ * settles. Only valid inside an exclusive() body.
  */
-interface ComputeGate {
-  /**
-   * Recheck disposal inside the lock: dispose() may have run after the caller
-   * captured the handle but before its queued body. feed()/finalize() check
-   * only before queuing (their native free is queued behind them).
-   */
-  recheckDisposed: boolean;
-  /**
-   * The op named in the Busy refusal while a stream holds the model lease, or
-   * null when the caller is that stream (feed()/finalize()).
-   */
-  busyOp: string | null;
-}
-
-/**
- * Opens the in-flight window around one worker call: installs `signal`'s abort
- * callback, then marks the session busy as `kind` so result reads fail fast.
- * The returned close() clears the mark, then uninstalls the callback; call it
- * in a `finally` right after the worker await.
- */
-type ComputeWindow = (kind: string, signal?: AbortSignal) => () => void;
-
-/** The gate for calls made by the stream that holds the model lease. */
-const STREAM_LEASE_HOLDER: ComputeGate = { recheckDisposed: false, busyOp: null };
+type ComputeCall = (
+  kind: string,
+  signal: AbortSignal | undefined,
+  fn: any,
+  ...args: any[]
+) => Promise<number>;
 
 interface SessionControl {
-  exclusive<T>(
-    gate: ComputeGate,
-    body: (open: ComputeWindow) => Promise<T>,
-  ): Promise<T>;
-  currentCompute(): string | null;
+  core: SessionCore;
   isCurrentStream(stream: Stream): boolean;
   replaceCurrentStream(stream: Stream): void;
   clearCurrentStream(stream: Stream): void;
@@ -807,55 +785,41 @@ class SessionCore {
     return this.#disposed;
   }
 
-  get inFlight(): string | null {
-    return this.#inFlight;
-  }
-
   /** Reads touch the session; forbidden while a worker call is in flight. */
   assertNotComputing(what: string): void {
     if (this.#inFlight) {
       throw new TranscribeError(
-        `cannot read session ${what} while ${this.#inFlight} is in flight; await it first`,
+        `cannot read ${what} while ${this.#inFlight} is in flight; await it first`,
       );
     }
   }
 
   /**
-   * Run `body` as this session's one native compute: the single path every
-   * run / batch / stream begin / feed / finalize / diarize run takes (Stream
-   * reaches it via SESSION_CONTROL). It queues on the model-wide FIFO lock, so
-   * no two computes on one model overlap and queued native frees (deferFree)
-   * run only after it drains. Once the lock is held, `gate` is applied —
-   * disposal, then the stream lease — before `body` runs. `body` opens the
-   * in-flight window (abort callback + in-flight mark) around its worker
-   * await, and copies its result out before returning, i.e. before the lock
-   * is released.
-   *
-   * Deliberately not `async`: refusals are returned as rejected promises and
-   * `body`'s promise is returned as-is, so settle timing matches the inline
-   * lock bodies this replaced.
+   * Run `body` as this session's one native compute on the model-wide FIFO
+   * lock (it copies results out before release). Refuses a disposed session,
+   * then an active stream (Busy naming `busyOp`); null `busyOp` = that stream.
+   * Not `async`: refusals and `body`'s promise are returned as-is (no extra ticks).
    */
   exclusive<T>(
-    gate: ComputeGate,
-    body: (open: ComputeWindow) => Promise<T>,
+    busyOp: string | null,
+    body: (call: ComputeCall) => Promise<T>,
   ): Promise<T> {
     return this.#lock.run(() => {
-      if (gate.recheckDisposed && this.#disposed)
+      if (busyOp !== null && this.#disposed)
         return Promise.reject(new TranscribeError("session has been disposed"));
-      if (gate.busyOp !== null && this.#lock.streamActive)
-        return Promise.reject(busyError(gate.busyOp));
-      return body(this.#openComputeWindow);
+      if (busyOp !== null && this.#lock.streamActive)
+        return Promise.reject(busyError(busyOp));
+      return body(this.#call);
     });
   }
 
-  /** See ComputeWindow. Only valid inside an exclusive() body. */
-  #openComputeWindow: ComputeWindow = (kind, signal) => {
+  #call: ComputeCall = (kind, signal, fn, ...args) => {
     const cancel = this.#installAbort(signal);
     this.#inFlight = kind;
-    return () => {
+    return callAsync<number>(fn, ...args).finally(() => {
       if (this.#inFlight === kind) this.#inFlight = null;
       cancel?.();
-    };
+    });
   };
 
   /**
@@ -925,8 +889,7 @@ export class Session {
     this.#lock = lock;
     this.#untrack = untrack;
     SESSION_CONTROL.set(this, {
-      exclusive: (gate, body) => this.#core.exclusive(gate, body),
-      currentCompute: () => this.#core.inFlight,
+      core: this.#core,
       isCurrentStream: (stream) => this.#activeStream === stream,
       replaceCurrentStream: (stream) => {
         if (this.#activeStream && this.#activeStream !== stream) {
@@ -946,7 +909,7 @@ export class Session {
   }
 
   get limits(): SessionLimits {
-    this.#core.assertNotComputing("limits");
+    this.#core.assertNotComputing("session limits");
     const n = this.#n;
     const l: any = {};
     n.F.sessionLimitsInit(l);
@@ -974,14 +937,8 @@ export class Session {
 
     const p = this.#buildRunParams(opts);
 
-    return this.#core.exclusive({ recheckDisposed: true, busyOp: "run" }, async (open) => {
-      const close = open("run()", opts.signal);
-      let status: number;
-      try {
-        status = await callAsync<number>(F.run, h, samples, samples.length, p);
-      } finally {
-        close();
-      }
+    return this.#core.exclusive("run", async (call) => {
+      const status = await call("run()", opts.signal, F.run, h, samples, samples.length, p);
 
       if (
         status === g.TRANSCRIBE_ERR_ABORTED ||
@@ -1069,21 +1026,10 @@ export class Session {
     const counts = Int32Array.from(arrays, (a) => a.length);
     const p = this.#buildRunParams(opts);
 
-    return this.#core.exclusive({ recheckDisposed: true, busyOp: "runBatch" }, async (open) => {
-      const close = open("runBatch()", opts.signal);
-      let status: number;
-      try {
-        status = await callAsync<number>(
-          F.runBatch,
-          h,
-          arrays,
-          counts,
-          arrays.length,
-          p,
-        );
-      } finally {
-        close();
-      }
+    return this.#core.exclusive("runBatch", async (call) => {
+      const status = await call(
+        "runBatch()", opts.signal, F.runBatch, h, arrays, counts, arrays.length, p,
+      );
       // A batch returns OK even with per-utterance failures; only a top-level
       // error (or a whole-batch abort) is fatal here.
       if (status !== g.TRANSCRIBE_OK && status !== g.TRANSCRIBE_ERR_ABORTED) {
@@ -1159,10 +1105,8 @@ export class Session {
     if (opts.family)
       sp.family = buildFamily(n, this.#model.handle, opts.family, "stream");
 
-    // The gate rechecks disposal inside the lock: dispose() may have run after
-    // we captured `h` but before this queued body — don't begin a stream on a
-    // dead session. Begin is a synchronous native call, so no in-flight window.
-    return this.#core.exclusive({ recheckDisposed: true, busyOp: "begin a stream" }, async () => {
+    // Begin is a synchronous native call, so no in-flight window (no call()).
+    return this.#core.exclusive("begin a stream", async () => {
       check(n, F.streamBegin(h, rp, sp), "transcribe_stream_begin");
       this.#lock.streamActive = true; // claim the lease for the whole stream lifetime
       // The Stream holds the Session (not a raw handle) so its calls fail fast
@@ -1176,7 +1120,7 @@ export class Session {
   }
 
   get wasAborted(): boolean {
-    this.#core.assertNotComputing("wasAborted");
+    this.#core.assertNotComputing("session wasAborted");
     return this.#n.F.wasAborted(this.handle);
   }
 
@@ -1271,41 +1215,19 @@ export class Stream {
     this.#assertCurrent("feed");
     if (!this.#active) throw new TranscribeError("stream has been reset");
     const samples = toFloat32(pcm);
-    return this.#sessionControl.exclusive(STREAM_LEASE_HOLDER, async (open) => {
+    return this.#sessionControl.core.exclusive(null, async (call) => {
       const u: any = {};
       n.F.streamUpdateInit(u);
-      // The native feed runs on a libuv worker. While it is in flight the
-      // session must not be touched from the main thread — the C session API
-      // is single-threaded (transcribe.h), and stream_get_text hands back
-      // pointers the feed may free/realloc. Flag the owning session so every
-      // result getter fails fast instead of racing into a use-after-free.
-      const close = open("feed()/finalize()");
-      try {
-        const status = await callAsync<number>(
-          n.F.streamFeed,
-          h,
-          samples,
-          samples.length,
-          u,
-        );
-        // The lease follows the native stream lifecycle, so on failure ask
-        // the stream where it ended up (still inside this exclusive slot, the
-        // worker call has returned). A feed rejected before the family hook
-        // (non-finite samples, other pre-hook INVALID_ARG) leaves it ACTIVE:
-        // keep the lease, so the stream stays usable and siblings stay Busy.
-        // A hook failure moves it to FAILED, which is no longer an active
-        // stream in the C API: keep the wrapper readable for state/lastStatus,
-        // but free the model-wide compute slot.
-        if (
-          status !== g.TRANSCRIBE_OK &&
-          n.F.streamGetState(h) !== g.TRANSCRIBE_STREAM_ACTIVE
-        ) {
-          this.#releaseLease();
-        }
-        check(n, status, "transcribe_stream_feed");
-      } finally {
-        close();
-      }
+      const status = await call(
+        "feed()/finalize()", undefined, n.F.streamFeed, h, samples, samples.length, u,
+      );
+      // The lease follows the native stream: a feed refused before the family
+      // hook (e.g. non-finite samples) leaves it ACTIVE, so keep the lease
+      // (siblings stay Busy); a hook failure moves it to FAILED, no longer
+      // active, so free the model-wide slot (state/lastStatus stay readable).
+      if (status !== g.TRANSCRIBE_OK && n.F.streamGetState(h) !== g.TRANSCRIBE_STREAM_ACTIVE)
+        this.#releaseLease();
+      check(n, status, "transcribe_stream_feed");
       return toStreamUpdate(u);
     });
   }
@@ -1316,18 +1238,13 @@ export class Stream {
     const h = this.#session.handle; // throws if the session was disposed
     this.#assertCurrent("finalize stream");
     if (!this.#active) throw new TranscribeError("stream has been reset");
-    return this.#sessionControl.exclusive(STREAM_LEASE_HOLDER, async (open) => {
+    return this.#sessionControl.core.exclusive(null, async (call) => {
       const u: any = {};
       n.F.streamUpdateInit(u);
-      const close = open("feed()/finalize()");
       try {
-        check(
-          n,
-          await callAsync<number>(n.F.streamFinalize, h, u),
-          "transcribe_stream_finalize",
-        );
+        const status = await call("feed()/finalize()", undefined, n.F.streamFinalize, h, u);
+        check(n, status, "transcribe_stream_finalize");
       } finally {
-        close();
         // Finalize ends the active stream (FINISHED on success, FAILED on
         // error), so the model is free again — release the lease either way.
         this.#releaseLease();
@@ -1336,25 +1253,11 @@ export class Stream {
     });
   }
 
-  /**
-   * Reads borrow session-owned snapshot memory, so they are forbidden while
-   * any worker call is computing on this session (concurrent use is undefined
-   * per transcribe.h). The natural await-then-read pattern is unaffected.
-   */
-  #assertNotComputing(what: string): void {
-    const compute = this.#sessionControl.currentCompute();
-    if (compute) {
-      throw new TranscribeError(
-        `cannot read stream ${what} while ${compute} is in flight; await it first`,
-      );
-    }
-  }
-
   /** Current text snapshot (copied at the boundary). */
   get text(): StreamText {
     const h = this.#session.handle; // throws if the session was disposed
     this.#assertCurrent("read stream text");
-    this.#assertNotComputing("text");
+    this.#sessionControl.core.assertNotComputing("stream text");
     const n = this.#n;
     const t: any = {};
     n.F.streamTextInit(t);
@@ -1371,7 +1274,7 @@ export class Stream {
     const h = this.#session.handle; // throws if the session was disposed
     this.#assertCurrent("read stream snapshot");
     if (!this.#active) throw new TranscribeError("stream has been reset");
-    this.#assertNotComputing("snapshot");
+    this.#sessionControl.core.assertNotComputing("stream snapshot");
     return materialize(this.#n, singleAccessors(this.#n, h));
   }
 
@@ -1379,14 +1282,14 @@ export class Stream {
     const h = this.#session.handle; // throws if the session was disposed
     this.#assertCurrent("read stream state");
     if (!this.#active) return "idle"; // reset() returns to idle; native reset may still be queued
-    this.#assertNotComputing("state");
+    this.#sessionControl.core.assertNotComputing("stream state");
     return STREAM_STATES[this.#n.F.streamGetState(h)] ?? "idle";
   }
 
   get revision(): number {
     const h = this.#session.handle; // throws if the session was disposed
     this.#assertCurrent("read stream revision");
-    this.#assertNotComputing("revision");
+    this.#sessionControl.core.assertNotComputing("stream revision");
     return this.#n.F.streamRevision(h);
   }
 
@@ -1398,7 +1301,7 @@ export class Stream {
   get lastStatus(): TranscribeError | null {
     const h = this.#session.handle; // throws if the session was disposed
     this.#assertCurrent("read stream lastStatus");
-    this.#assertNotComputing("lastStatus");
+    this.#sessionControl.core.assertNotComputing("stream lastStatus");
     const n = this.#n;
     const status = n.F.streamLastStatus(h);
     if (status === g.TRANSCRIBE_OK) return null;
@@ -1474,14 +1377,8 @@ export class DiarizeSession {
     if (opts.family)
       p.family = buildFamily(n, this.#model.handle, opts.family, "diarize_run");
 
-    return this.#core.exclusive({ recheckDisposed: true, busyOp: "diarize" }, async (open) => {
-      const close = open("run()", opts.signal);
-      let status: number;
-      try {
-        status = await callAsync<number>(F.diarizeRun, h, samples, samples.length, p);
-      } finally {
-        close();
-      }
+    return this.#core.exclusive("diarize", async (call) => {
+      const status = await call("run()", opts.signal, F.diarizeRun, h, samples, samples.length, p);
       check(n, status, "transcribe_diarize_run");
       return readSpeakerSegments(n, F.diarizeNSegments(h), (i, o) =>
         F.diarizeGetSegment(h, i, o),
@@ -1491,7 +1388,7 @@ export class DiarizeSession {
 
   /** load_ms plus the last run's mel / encode time. */
   get timings(): Timings {
-    this.#core.assertNotComputing("timings");
+    this.#core.assertNotComputing("session timings");
     const h = this.#core.handle;
     return readTimings(this.#n, (o) => this.#n.F.diarizeGetTimings(h, o));
   }
