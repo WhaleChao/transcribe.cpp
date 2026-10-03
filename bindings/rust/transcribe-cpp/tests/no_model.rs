@@ -137,5 +137,6 @@ fn handles_are_send_sync() {
     fn assert_send<T: Send>() {}
     assert_send_sync::<Model>();
     assert_send::<transcribe_cpp::Session>();
-    // Session is intentionally NOT Sync (single-threaded use).
+    assert_send::<transcribe_cpp::DiarizeSession>();
+    // Sessions are intentionally NOT Sync (single-threaded use).
 }

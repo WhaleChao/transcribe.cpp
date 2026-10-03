@@ -33,7 +33,7 @@ fn streams_jfk_committed_text() {
     };
     let model = Model::load(&model_path).unwrap();
     assert!(
-        model.capabilities().supports_streaming,
+        model.capabilities().unwrap().supports_streaming,
         "model does not advertise streaming"
     );
 

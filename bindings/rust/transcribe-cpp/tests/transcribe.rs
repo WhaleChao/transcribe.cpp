@@ -68,7 +68,7 @@ fn capabilities_and_identity() {
     let model = Model::load(&model_path).unwrap();
     assert_eq!(model.arch(), "whisper", "arch: {}", model.arch());
     assert!(model.backend().to_lowercase().contains("cpu") || !model.backend().is_empty());
-    let caps = model.capabilities();
+    let caps = model.capabilities().unwrap();
     assert!(caps.native_sample_rate > 0, "{caps:?}");
 }
 
@@ -196,7 +196,7 @@ fn requested_timestamps_populate_rows() {
         return;
     };
     let model = Model::load(&model_path).unwrap();
-    let caps = model.capabilities();
+    let caps = model.capabilities().unwrap();
     // Request the finest granularity the model actually supports (a request
     // finer than max_timestamp_kind correctly returns Unsupported, status 12).
     if caps.max_timestamp_kind == TimestampKind::None {
@@ -228,7 +228,7 @@ fn timestamps_finer_than_supported_is_unsupported() {
         return;
     };
     let model = Model::load(&model_path).unwrap();
-    let caps = model.capabilities();
+    let caps = model.capabilities().unwrap();
     if caps.max_timestamp_kind == TimestampKind::Token {
         return; // already at the finest; nothing finer to ask for
     }

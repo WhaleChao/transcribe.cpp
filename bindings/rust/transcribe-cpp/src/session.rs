@@ -297,34 +297,15 @@ impl Session {
         })
     }
 
-    /// Make one native compute call on this session under the model's compute
-    /// lock. Every call that drives native compute (run, batch, stream
-    /// begin/feed/finalize/reset/drop) goes through here.
-    ///
-    /// Under the lock, in order: if `refuse_if_streaming` is `Some(msg)` and a
-    /// stream on this model holds the lease, return `Error::Busy(msg)` without
-    /// calling `f`; otherwise call `f` with this session's native handle and
-    /// the lease flag (so a stream begin/end can take or release the lease
-    /// atomically with its native call). Pass `None` from the stream that holds
-    /// the lease; the call then never fails. The lock is released when this
-    /// returns, so callers copy results out of the session's own result
-    /// storage afterwards.
+    /// [`ModelInner::with_compute`], handing `f` this session's native handle.
     pub(crate) fn with_compute<R>(
         &mut self,
         refuse_if_streaming: Option<&str>,
         f: impl FnOnce(*mut sys::transcribe_session, &mut bool) -> R,
     ) -> Result<R> {
-        let mut lease = self
-            .model
-            .compute_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        if let Some(msg) = refuse_if_streaming {
-            if *lease {
-                return Err(Error::Busy(msg.into()));
-            }
-        }
-        Ok(f(self.ptr, &mut lease))
+        let ptr = self.ptr;
+        self.model
+            .with_compute(refuse_if_streaming, |lease| f(ptr, lease))
     }
 
     // --- result materialization (top-level / single accessors) ---------------
@@ -520,7 +501,7 @@ fn build_run_params(o: &RunOptions) -> Result<RunParamsBundle> {
 }
 
 /// PCM/utterance lengths cross the ABI as `int`; reject anything that overflows.
-fn clamp_len(len: usize) -> Result<i32> {
+pub(crate) fn clamp_len(len: usize) -> Result<i32> {
     i32::try_from(len).map_err(|_| Error::InvalidArgument(format!("length {len} exceeds i32::MAX")))
 }
 
