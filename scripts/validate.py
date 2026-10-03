@@ -501,6 +501,8 @@ def cmd_cpp(args: argparse.Namespace) -> int:
             cmd += ["--language", language]
         if args.family == "whisper":
             cmd += ["--timestamps", "none"]
+        if args.family == "sortformer":
+            cmd += ["--role", "diarize"]
         if args.family in ("sensevoice", "parakeet"):
             # The reference dumper emits the raw token stream including
             # control / language tags (sensevoice: language / event /
@@ -548,6 +550,8 @@ def cmd_cpp(args: argparse.Namespace) -> int:
                 f"with exit code {result.returncode}"
             )
         transcript = parse_cli_transcript(result.stdout or "")
+        if transcript is None and "speaker segments:" in (result.stdout or ""):
+            continue  # a diarizer has no transcript
         if transcript is None:
             raise SystemExit(
                 f"error: cpp dump [{args.family}/{case_name}] did not emit a transcript line"
