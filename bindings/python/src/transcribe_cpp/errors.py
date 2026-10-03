@@ -101,15 +101,8 @@ class InputTooLong(TranscribeError):
 
 class Busy(TranscribeError):
     """A stream is active on this model, so the call was refused instead of
-    started.
-
-    The C library allows one run / batch / active stream per model across
-    ALL of its sessions, and an active stream occupies the model from begin
-    until it ends, not just during a feed. While one is active,
-    ``Session.run()``, ``run_batch()`` and ``stream()`` on any session of
-    that model raise this at once. Finalize or reset the stream first, or
-    give each concurrent worker its own Model. Raised purely on the Python
-    side, so ``status`` is 0."""
+    started (see ``Model``). Finalize or reset the stream first, or use one
+    Model per worker. Raised by the binding, so ``status`` is 0."""
 
 
 class Aborted(TranscribeError):

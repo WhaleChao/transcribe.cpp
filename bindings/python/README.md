@@ -75,11 +75,10 @@ Long transcriptions can be cancelled from another thread with
 Models whose `model.roles` include `Role.DIARIZE` (Sortformer) answer "who
 spoke when" through a diarize session. `run()` returns `SpeakerSegment`
 rows (`speaker_id` in `1..model.diarize_info.max_speakers`), grouped by
-speaker. It shares the model-wide compute lock with transcription runs and
-raises `Busy` while a stream is active. `cancel()` and `close()` work as on
-`Session`. A model without the role raises `UnsupportedRole`, as
-`model.session()` and `model.capabilities` do on a model without `Role.ASR`
-(Sortformer serves only `Role.DIARIZE`).
+speaker. Locking, `Busy`, `cancel()` and `close()` work as on `Session`. A
+model without the role raises `UnsupportedRole`, as `model.session()` and
+`model.capabilities` do on a model without `Role.ASR` (Sortformer serves only
+`Role.DIARIZE`).
 
 ```python
 with model.diarize_session() as diarizer:
@@ -139,16 +138,10 @@ TRANSCRIBE_LIBRARY=../../build-shared/src/libtranscribe.dylib \
 
 ## Notes
 
-- One compute call at a time per `Model` in 0.x: sessions share the model's
-  compute backend, so the binding serializes `run` / `run_batch` / stream
-  calls across all sessions of a model with a model-wide lock. Calls from
-  other threads wait their turn (they no longer race); load one model per
-  worker for parallel transcription. An active stream occupies the model
-  between feeds, so while one is active, `run` / `run_batch` / `stream` on
-  any session of that model raise `transcribe_cpp.Busy` at once instead of
-  waiting. `finalize()` or `reset()` the stream (or close its session) to
-  free the model. A feed rejected for NaN/Inf samples keeps the stream
-  active. See the `Model` docstring.
+- One compute call at a time per `Model`: the binding serializes calls across
+  all sessions of a model with a model-wide lock (load one model per worker
+  for parallelism). While a stream is active, other runs and stream begins on
+  that model raise `transcribe_cpp.Busy`. See the `Model` docstring.
 - Import package: `transcribe_cpp`
 - Distribution: `transcribe-cpp`
 - License: MIT

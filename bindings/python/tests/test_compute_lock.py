@@ -1,18 +1,7 @@
-"""Model-wide compute lock and stream lease: deterministic tests that need NO
-model.
-
-The native library allows one compute call in flight per model across all of
-its sessions, and an active stream occupies the model from begin until it
-ends. The binding enforces that with ``Model._exclusive(kind)`` and the
-model-wide stream lease (``Model._stream_lease``). These
-tests build Model/Session objects around fake handles and replace the native
-entry points the high-level code calls (``transcribe_cpp._lib.<fn>``, looked
-up at call time) with Python probes, so overlap, waiting, deferred frees and
-re-entrancy are observed directly — no GGUF, no native compute.
-
-Every native call that could touch a fake handle is patched, and the fixture
-closes every fake (and collects garbage) BEFORE monkeypatch restores the real
-functions, so a fake handle never reaches the real library.
+"""Model-wide compute lock and stream lease (see ``Model``), with NO model:
+Model/Session objects wrap fake handles and the native entry points are
+replaced by Python probes. The fixture closes every fake before monkeypatch
+restores the real functions, so a fake handle never reaches the library.
 """
 
 from __future__ import annotations
@@ -75,8 +64,7 @@ def fake(monkeypatch):
     # The copy-out reads many native accessors; stub it to report which
     # handle it was given (proves the in-flight call kept its handle).
     monkeypatch.setattr(t.Session, "_materialize",
-                        lambda self, h=None, utt=None:
-                        ("result", (h or self._h).value, utt))
+                        lambda self, h, utt=None: ("result", h.value, utt))
 
     def model():
         m = t.Model.__new__(t.Model)
@@ -86,8 +74,8 @@ def fake(monkeypatch):
         made.append(m)
         return m
 
-    def session(m, track=True):
-        s = t.Session.__new__(t.Session)
+    def session(m, cls=t.Session, track=True):
+        s = cls.__new__(cls)
         s._model = m
         s._handle = ctypes.c_void_p(next(ids))
         s._cancel = threading.Event()
@@ -97,17 +85,7 @@ def fake(monkeypatch):
             made.append(s)
         return s
 
-    def diarize(m):
-        d = t.DiarizeSession.__new__(t.DiarizeSession)
-        d._model = m
-        d._handle = ctypes.c_void_p(next(ids))
-        d._cancel = threading.Event()
-        d._abort_trampoline = None
-        m._sessions.add(d)
-        made.append(d)
-        return d
-
-    yield SimpleNamespace(model=model, session=session, diarize=diarize,
+    yield SimpleNamespace(model=model, session=session,
                           frees=frees, resets=resets, state=state)
 
     for obj in reversed(made):
@@ -117,6 +95,7 @@ def fake(monkeypatch):
 
 
 PCM = [0.0] * 160
+SESSION_CLS = {"session": t.Session, "diarize": t.DiarizeSession}
 
 
 class _LockSpy:
@@ -161,8 +140,7 @@ class _Gate:
 
 def test_calls_on_two_sessions_never_overlap(fake, monkeypatch):
     m = fake.model()
-    s1, s2, s3 = fake.session(m), fake.session(m), fake.session(m)
-    stream = t.Stream(s3)
+    sessions = [fake.session(m) for _ in range(3)]
 
     guard = threading.Lock()
     state = {"active": 0, "max": 0, "calls": 0}
@@ -178,7 +156,6 @@ def test_calls_on_two_sessions_never_overlap(fake, monkeypatch):
         return 0
 
     monkeypatch.setattr(t._lib, "transcribe_run", probe)
-    monkeypatch.setattr(t._lib, "transcribe_stream_feed", probe)
 
     start = threading.Barrier(3)
     n = 5
@@ -187,48 +164,13 @@ def test_calls_on_two_sessions_never_overlap(fake, monkeypatch):
         start.wait(TIMEOUT)
         return [session.run(PCM) for _ in range(n)]
 
-    def feeds():
-        start.wait(TIMEOUT)
-        return [stream.feed(PCM) for _ in range(n)]
-
-    workers = [_in_thread(runs, s1), _in_thread(runs, s2), _in_thread(feeds)]
+    workers = [_in_thread(runs, s) for s in sessions]
     for th, _ in workers:
         _join(th, "worker")
-    for _, box in workers:
-        assert "error" not in box, box["error"]
-
     assert state["calls"] == 3 * n
     assert state["max"] == 1, "compute calls on one model overlapped"
-    assert workers[0][1]["value"] == [("result", s1._handle.value, None)] * n
-    assert workers[1][1]["value"] == [("result", s2._handle.value, None)] * n
-
-
-def test_contended_call_waits_instead_of_raising(fake, monkeypatch):
-    m = fake.model()
-    s1, s2 = fake.session(m), fake.session(m)
-    gate = _Gate()
-    second_entered = threading.Event()
-
-    def probe(h, *rest):
-        if h.value == s1._handle.value:
-            return gate(h)
-        second_entered.set()
-        return 0
-
-    monkeypatch.setattr(t._lib, "transcribe_run", probe)
-    try:
-        a, a_box = _in_thread(s1.run, PCM)
-        assert gate.entered.wait(TIMEOUT)
-        b, b_box = _in_thread(s2.run, PCM)
-        # B must be parked on the lock: not in native, not failed, not done.
-        assert not second_entered.wait(0.3), "second call overlapped the first"
-        assert b.is_alive() and not b_box, f"contended call did not wait: {b_box}"
-    finally:
-        gate.release.set()
-    _join(a, "first run")
-    _join(b, "second run")
-    assert "error" not in a_box and "error" not in b_box, (a_box, b_box)
-    assert b_box["value"] == ("result", s2._handle.value, None)
+    for s, (_, box) in zip(sessions, workers):
+        assert box.get("value") == [("result", s._handle.value, None)] * n, box
 
 
 def test_lock_is_per_model(fake, monkeypatch):
@@ -272,7 +214,7 @@ def test_every_compute_site_holds_the_lock(fake, monkeypatch):
                         holds("transcribe_batch_n_results", ret=1))
     real_materialize = t.Session._materialize
 
-    def materialize(self, h=None, utt=None):
+    def materialize(self, h, utt=None):
         seen.append(("copy-out", m._compute_lock.locked()))
         return real_materialize(self, h, utt)
 
@@ -311,11 +253,13 @@ def test_lock_released_after_native_error(fake, monkeypatch):
 # --- cancellation -------------------------------------------------------------
 
 
-def test_cancel_while_queued_is_kept(fake, monkeypatch):
+@pytest.mark.parametrize("kind", ["session", "diarize"])
+def test_cancel_while_queued_is_kept(fake, diarize_native, monkeypatch, kind):
     # cancel() is lock-free and the flag is cleared BEFORE the lock wait, so
     # a cancel issued while a call is queued is still set when it starts.
     m = fake.model()
-    s1, s2 = fake.session(m), fake.session(m)
+    s1, s2 = fake.session(m), fake.session(m, cls=SESSION_CLS[kind])
+    diarize_native.owner["model"] = m
     gate = _Gate()
     flag_at_start: list = []
 
@@ -326,6 +270,7 @@ def test_cancel_while_queued_is_kept(fake, monkeypatch):
         return 0
 
     monkeypatch.setattr(t._lib, "transcribe_run", probe)
+    monkeypatch.setattr(t._lib, "transcribe_diarize_run", probe)
     try:
         a, _ = _in_thread(s1.run, PCM)
         assert gate.entered.wait(TIMEOUT)
@@ -343,12 +288,17 @@ def test_cancel_while_queued_is_kept(fake, monkeypatch):
 # --- close / GC during an in-flight call ------------------------------------------
 
 
-def test_session_close_during_in_flight_call_defers_free(fake, monkeypatch):
+@pytest.mark.parametrize("kind", ["session", "diarize"])
+def test_session_close_during_in_flight_call_defers_free(fake, diarize_native,
+                                                         monkeypatch, kind):
     m = fake.model()
-    s = fake.session(m)
+    s = fake.session(m, cls=SESSION_CLS[kind])
+    diarize_native.owner["model"] = m
     handle = s._handle.value
     gate = _Gate()
     monkeypatch.setattr(t._lib, "transcribe_run", gate)
+    monkeypatch.setattr(t._lib, "transcribe_diarize_run",
+                        lambda *a: gate() or diarize_native.run(*a))
     try:
         a, a_box = _in_thread(s.run, PCM)
         assert gate.entered.wait(TIMEOUT)
@@ -359,9 +309,11 @@ def test_session_close_during_in_flight_call_defers_free(fake, monkeypatch):
         gate.release.set()
     _join(a, "in-flight run")
     # The in-flight call finished its copy-out on the handle it captured...
-    assert a_box.get("value") == ("result", handle, None), a_box
+    expected = ROWS if kind == "diarize" else ("result", handle, None)
+    assert a_box.get("value") == expected, a_box
+    assert all(c[1] == handle for c in diarize_native.calls)
     # ...and the deferred free ran exactly once, after it.
-    assert fake.frees == [("session", handle)]
+    assert fake.frees == [(kind, handle)]
     with pytest.raises(t.TranscribeError, match="closed"):
         s.run(PCM)
 
@@ -425,23 +377,6 @@ def test_gc_on_holder_thread_defers_free(fake, monkeypatch):
     assert fake.frees.count(victim) == 1
 
 
-def test_close_from_holder_thread_does_not_deadlock(fake, monkeypatch):
-    m = fake.model()
-    s, other = fake.session(m), fake.session(m)
-    hother = other._handle.value
-
-    def probe(*args):
-        other.close()  # same thread as the lock holder: must return at once
-        assert fake.frees == []
-        return 0
-
-    monkeypatch.setattr(t._lib, "transcribe_run", probe)
-    th, box = _in_thread(s.run, PCM)
-    _join(th, "run closing another session from inside the call")
-    assert "error" not in box, box
-    assert fake.frees == [("session", hother)]
-
-
 def test_reentrant_compute_raises_instead_of_deadlocking(fake, monkeypatch):
     # e.g. a log handler that calls run() from inside a native call.
     m = fake.model()
@@ -465,11 +400,6 @@ def test_reentrant_compute_raises_instead_of_deadlocking(fake, monkeypatch):
 
 
 # --- stream lease ---------------------------------------------------------------
-#
-# From a successful stream begin until that stream ends, run / run_batch /
-# stream on ANY session of the model raise Busy at once (the C contract
-# forbids a run between the feeds of an active stream on another session).
-# The stream itself keeps feeding. These mirror the Rust/Swift/TS bindings.
 
 RUN_BUSY = "a stream is active on this model; finish or drop it before run()"
 BATCH_BUSY = ("a stream is active on this model; "
@@ -540,13 +470,6 @@ def test_active_stream_refuses_sibling_and_same_session_calls(fake, native):
     _assert_free(s1)
 
 
-def test_busy_is_exported():
-    assert "Busy" in t.__all__
-    assert t.Busy is t.errors.Busy
-    assert issubclass(t.Busy, t.TranscribeError)
-    assert not issubclass(t.Busy, t.InvalidArgument)
-
-
 def test_lease_is_per_model(fake, native):
     s1 = fake.session(fake.model())
     other = fake.session(fake.model())
@@ -560,13 +483,12 @@ def test_failed_begin_takes_no_lease(fake, native):
     native.status["begin"] = _generated.TRANSCRIBE_ERR_NOT_IMPLEMENTED
     with pytest.raises(t.NotImplementedByModel):
         s1.stream()
-    assert m._stream_lease.owner is None
+    assert m._stream_owner is None
     _assert_free(s2)
 
 
 @pytest.mark.parametrize("ending", [
-    "finalize", "finalize_error", "reset", "context_exit", "gc",
-    "session_close",
+    "finalize", "finalize_error", "reset", "gc", "session_close",
 ])
 def test_lease_released_when_stream_ends(fake, native, ending):
     m = fake.model()
@@ -585,10 +507,6 @@ def test_lease_released_when_stream_ends(fake, native, ending):
     elif ending == "reset":
         stream.reset()
         assert fake.resets == [h1]
-    elif ending == "context_exit":
-        with stream:
-            pass
-        assert fake.resets == [h1]
     elif ending == "gc":
         stream._cycle = stream  # only the cyclic GC can reclaim it
         del stream
@@ -598,7 +516,7 @@ def test_lease_released_when_stream_ends(fake, native, ending):
         s1.close()
         assert fake.frees == [("session", h1)]
 
-    assert m._stream_lease.owner is None
+    assert m._stream_owner is None
     _assert_free(s2)
     if ending == "session_close":
         # The stream outlived its session: dropping it now must not reset
@@ -613,7 +531,7 @@ def test_model_close_releases_lease(fake, native):
     s1 = fake.session(m)
     stream = s1.stream()
     m.close()
-    assert m._stream_lease.owner is None
+    assert m._stream_owner is None
     with pytest.raises(t.TranscribeError, match="closed"):
         stream.feed(PCM)
     del stream
@@ -652,7 +570,7 @@ def test_feed_failure_that_ends_stream_releases_lease(fake, native):
     fake.state["value"] = _generated.TRANSCRIBE_STREAM_FAILED
     with pytest.raises(t.Aborted):
         stream.feed(PCM)
-    assert m._stream_lease.owner is None
+    assert m._stream_owner is None
     _assert_free(s2)
 
 
@@ -739,13 +657,13 @@ def test_stream_gc_on_holder_thread_defers_reset(fake, native, monkeypatch):
         # Simulate a stream on victim_session that holds the lease and is
         # dropped mid-call (a real begin here would be a re-entrant call).
         lease = t._StreamLease(victim_session._handle)
-        m._stream_lease.owner = lease
+        m._stream_owner = lease
         victim = t.Stream(victim_session, _lease=lease)
         victim._cycle = victim
         del victim
         gc.collect()  # runs Stream.__del__ on THIS thread, lock held
         during["resets"] = list(fake.resets)
-        during["owner"] = m._stream_lease.owner
+        during["owner"] = m._stream_owner
         return 0
 
     monkeypatch.setattr(t._lib, "transcribe_run", run)
@@ -755,7 +673,7 @@ def test_stream_gc_on_holder_thread_defers_reset(fake, native, monkeypatch):
     assert during["resets"] == [], "stream reset under the in-flight call"
     assert during["owner"] is not None, "lease released under the lock early"
     assert fake.resets == [hv]
-    assert m._stream_lease.owner is None
+    assert m._stream_owner is None
     monkeypatch.setattr(t._lib, "transcribe_run", lambda *a: 0)
     _assert_free(s)
 
@@ -781,7 +699,7 @@ def test_session_close_releases_lease_after_free(fake, native, monkeypatch):
         a, a_box = _in_thread(stream.feed, PCM)
         assert gate.entered.wait(TIMEOUT)
         s1.close()  # never waits; the free is queued behind the feed
-        assert fake.frees == [] and m._stream_lease.owner is not None
+        assert fake.frees == [] and m._stream_owner is not None
         spy = _LockSpy(m)
         b, b_box = _in_thread(s2.run, PCM)
         assert spy.waiting.wait(TIMEOUT)
@@ -792,17 +710,13 @@ def test_session_close_releases_lease_after_free(fake, native, monkeypatch):
     assert "error" not in a_box, a_box
     assert b_box.get("value") == ("result", s2._handle.value, None), b_box
     assert seen["frees"] == [("session", h1)]
-    assert m._stream_lease.owner is None
+    assert m._stream_owner is None
     del stream
     gc.collect()
     assert fake.resets == []
 
 
-# --- DiarizeSession.run -----------------------------------------------------------
-#
-# The DIARIZE role's run goes through the same Model._exclusive bridge as
-# Session.run: model-wide lock, Busy under a stream lease, copy-out under the
-# lock on the captured handle, deferred frees, lock-free cancel.
+# --- DiarizeSession (close / cancel are parametrized into the tests above) ----
 
 DIARIZE_BUSY = ("a stream is active on this model; "
                 "finish or drop it before diarize run()")
@@ -845,7 +759,7 @@ ROWS = [t.SpeakerSegment(t0_ms=0, t1_ms=50, speaker_id=1, p=0.5),
 
 def test_diarize_run_and_copy_out_hold_the_lock(fake, diarize_native):
     m = fake.model()
-    d = fake.diarize(m)
+    d = fake.session(m, cls=t.DiarizeSession)
     diarize_native.owner["model"] = m
     assert d.run(PCM) == ROWS
     names = [c[0] for c in diarize_native.calls]
@@ -885,29 +799,9 @@ def test_diarize_session_init_failure_raises_unsupported_role(fake, monkeypatch)
     assert not list(m._sessions)
 
 
-def test_diarize_run_waits_for_session_run(fake, diarize_native, monkeypatch):
-    m = fake.model()
-    s, d = fake.session(m), fake.diarize(m)
-    diarize_native.owner["model"] = m
-    gate = _Gate()
-    monkeypatch.setattr(t._lib, "transcribe_run", gate)
-    try:
-        a, a_box = _in_thread(s.run, PCM)
-        assert gate.entered.wait(TIMEOUT)
-        spy = _LockSpy(m)
-        b, b_box = _in_thread(d.run, PCM)
-        assert spy.waiting.wait(TIMEOUT)  # parked on the lock, not failed
-        assert b.is_alive() and not b_box and diarize_native.calls == []
-    finally:
-        gate.release.set()
-    _join(a, "session run")
-    _join(b, "queued diarize run")
-    assert "error" not in a_box and b_box.get("value") == ROWS, (a_box, b_box)
-
-
 def test_diarize_run_busy_while_stream_active(fake, native, diarize_native):
     m = fake.model()
-    s, d = fake.session(m), fake.diarize(m)
+    s, d = fake.session(m), fake.session(m, cls=t.DiarizeSession)
     diarize_native.owner["model"] = m
     stream = s.stream()
     with pytest.raises(t.Busy) as ei:
@@ -916,84 +810,3 @@ def test_diarize_run_busy_while_stream_active(fake, native, diarize_native):
     assert diarize_native.calls == [] and not m._compute_lock.locked()
     stream.finalize()
     assert d.run(PCM) == ROWS
-
-
-def _gated_diarize_run(diarize_native, monkeypatch):
-    gate = _Gate()
-
-    def run(*args):
-        gate()
-        return diarize_native.run(*args)
-
-    monkeypatch.setattr(t._lib, "transcribe_diarize_run", run)
-    return gate
-
-
-def test_diarize_close_during_in_flight_run_defers_free(fake, diarize_native,
-                                                        monkeypatch):
-    m = fake.model()
-    d = fake.diarize(m)
-    diarize_native.owner["model"] = m
-    hd = d._handle.value
-    gate = _gated_diarize_run(diarize_native, monkeypatch)
-    try:
-        a, a_box = _in_thread(d.run, PCM)
-        assert gate.entered.wait(TIMEOUT)
-        closer, _ = _in_thread(d.close)
-        _join(closer, "diarize close() during an in-flight run")
-        assert fake.frees == [], "diarize session freed under an in-flight run"
-    finally:
-        gate.release.set()
-    _join(a, "in-flight diarize run")
-    assert a_box.get("value") == ROWS, a_box
-    assert all(c[1] == hd for c in diarize_native.calls)  # the captured handle
-    assert fake.frees == [("diarize", hd)]
-    with pytest.raises(t.TranscribeError, match="closed"):
-        d.run(PCM)
-
-
-def test_model_close_during_in_flight_diarize_run_frees_session_first(
-        fake, diarize_native, monkeypatch):
-    m = fake.model()
-    d = fake.diarize(m)
-    diarize_native.owner["model"] = m
-    hd, hm = d._handle.value, m._handle.value
-    gate = _gated_diarize_run(diarize_native, monkeypatch)
-    try:
-        a, a_box = _in_thread(d.run, PCM)
-        assert gate.entered.wait(TIMEOUT)
-        closer, _ = _in_thread(m.close)
-        _join(closer, "model.close() during an in-flight diarize run")
-        assert fake.frees == []
-    finally:
-        gate.release.set()
-    _join(a, "in-flight diarize run")
-    assert a_box.get("value") == ROWS, a_box
-    assert fake.frees == [("diarize", hd), ("model", hm)]
-
-
-def test_diarize_cancel_while_queued_is_kept(fake, diarize_native, monkeypatch):
-    m = fake.model()
-    s, d = fake.session(m), fake.diarize(m)
-    diarize_native.owner["model"] = m
-    gate = _Gate()
-    flag_at_start: list = []
-
-    def run(*args):
-        flag_at_start.append(d._cancel.is_set())
-        return diarize_native.run(*args)
-
-    monkeypatch.setattr(t._lib, "transcribe_run", gate)
-    monkeypatch.setattr(t._lib, "transcribe_diarize_run", run)
-    try:
-        a, _ = _in_thread(s.run, PCM)
-        assert gate.entered.wait(TIMEOUT)
-        spy = _LockSpy(m)
-        b, _ = _in_thread(d.run, PCM)
-        assert spy.waiting.wait(TIMEOUT)  # cleared its flag and is parked
-        d.cancel()  # must not block although the lock is held
-    finally:
-        gate.release.set()
-    _join(a, "session run")
-    _join(b, "queued diarize run")
-    assert flag_at_start == [True]

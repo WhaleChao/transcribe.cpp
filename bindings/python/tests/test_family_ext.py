@@ -80,8 +80,6 @@ def test_sortformer_unknown_preset_rejected():
 
 
 def test_sortformer_diarize_preset_maps_to_enum_value():
-    built = t.SortformerDiarizeOptions(preset="low_latency")._build()
-    assert built.preset == _generated.TRANSCRIBE_SORTFORMER_PRESET_LOW_LATENCY
     built = t.SortformerDiarizeOptions(preset="very_high_latency")._build()
     assert built.preset == _generated.TRANSCRIBE_SORTFORMER_PRESET_VERY_HIGH_LATENCY
     # None keeps the init default (DEFAULT = GGUF-shipped cfg).

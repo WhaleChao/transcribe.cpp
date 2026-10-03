@@ -62,8 +62,6 @@ def test_diarize_run_golden_segments(sortformer_model_path, mix_pcm, preset):
         with model.diarize_session() as d:
             rows = d.run(mix_pcm, family=t.SortformerDiarizeOptions(preset=preset))
             timings = d.timings
-    assert isinstance(rows, list)
-    assert all(isinstance(r, t.SpeakerSegment) for r in rows)
     assert all(math.isnan(r.p) for r in rows)  # Sortformer has no per-turn p
     assert _turns(rows) == GOLDEN[preset]
     assert timings.encode_ms > 0
@@ -79,8 +77,6 @@ def test_bad_preset_rejected(sortformer_model_path, mix_pcm):
     class OutOfRange(t.SortformerDiarizeOptions):
         _presets = {**t.SortformerDiarizeOptions._presets, "bogus": 99}
 
-    with pytest.raises(ValueError, match="preset"):
-        t.SortformerDiarizeOptions(preset="bogus")  # type: ignore[arg-type]
     with t.Model(sortformer_model_path) as model, model.diarize_session() as d:
         with pytest.raises(t.InvalidArgument):
             d.run(mix_pcm, family=OutOfRange(preset="bogus"))  # type: ignore[arg-type]

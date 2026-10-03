@@ -76,20 +76,14 @@ def test_gc_order_session_keeps_model_alive(model_path, audio_pcm):
 
 # --- multi-session use of one model ------------------------------------------
 #
-# Natively, at most one compute call may be in flight across the sessions of
-# one model — they share its compute backend and some family state, so
-# overlapping runs race (observed: corrupted whisper decodes on CPU,
-# command-buffer failures on Metal). The binding enforces that itself with a
-# model-wide compute lock: concurrent calls from several threads serialize
-# (they wait; only an active stream makes them raise Busy), so callers no
-# longer need their own lock. The deterministic, model-free lock and stream
-# lease tests live in test_compute_lock.py.
+# Sessions of one model share its compute backend, so the binding serializes
+# their calls with a model-wide lock (see Model). The model-free lock and
+# stream lease tests live in test_compute_lock.py.
 
 
 def test_serial_sessions_across_threads(model_path, audio_pcm):
     # Two threads, each with its own session, runs serialized by a caller
-    # lock: the session-pool pattern written before the binding locked
-    # internally. Must keep working (the two locks nest without deadlock).
+    # lock: must keep working (it nests with the binding's lock).
     import threading
 
     lock = threading.Lock()
@@ -160,9 +154,8 @@ print("CONCURRENT-OK")
 
 
 def test_concurrent_sessions_on_shared_model(model_path, audio_path):
-    # Was an xfail (overlapping runs raced and corrupted decodes) until the
-    # binding's model-wide compute lock: unsynchronized callers on two
-    # sessions of one model now wait for each other and both decode cleanly.
+    # Unsynchronized callers on two sessions of one model wait for each
+    # other and both decode cleanly.
     import os
     import subprocess
     import sys

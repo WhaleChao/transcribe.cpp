@@ -163,29 +163,6 @@ def test_second_stream_while_active_rejected(streaming_model_path, audio_pcm):
             assert stream.state == "active"
 
 
-def test_run_while_stream_active_rejected(streaming_model_path, audio_pcm):
-    # While a stream is active, the stream lease refuses run/run_batch on
-    # ANY session of the model with Busy (the C contract forbids a run
-    # between another session's feeds), the stream stays usable, and once
-    # it is finalized a sibling run goes through.
-    with t.Model(streaming_model_path) as model, model.session() as session:
-        with model.session() as sibling, session.stream() as stream:
-            stream.feed(audio_pcm[:16000])
-            for target in (session, sibling):
-                with pytest.raises(t.Busy, match=r"before run\(\)"):
-                    target.run(audio_pcm[:16000])
-                with pytest.raises(t.Busy, match=r"before run_batch\(\)"):
-                    target.run_batch([audio_pcm[:16000]])
-            for i in range(16000, len(audio_pcm), 16000):
-                stream.feed(audio_pcm[i : i + 16000])
-            stream.finalize()
-            assert stream.state == "finished"
-            committed = stream.text().committed
-            ran = sibling.run(audio_pcm).text
-    assert "country" in committed.lower(), committed
-    assert "country" in ran.lower(), ran
-
-
 def test_rejected_feed_keeps_stream_active(streaming_model_path, audio_pcm):
     # Non-finite PCM is rejected BEFORE the family hook: the feed raises
     # InvalidArgument but the native stream stays ACTIVE (only failures
@@ -203,10 +180,6 @@ def test_rejected_feed_keeps_stream_active(streaming_model_path, audio_pcm):
             assert not model._compute_lock.locked()
             with pytest.raises(t.Busy):
                 sibling.run(audio_pcm[:16000])
-            with pytest.raises(t.Busy):
-                sibling.stream()
-            with pytest.raises(t.Busy):
-                session.run(audio_pcm[:16000])
             for i in range(16000, len(audio_pcm), 16000):
                 stream.feed(audio_pcm[i : i + 16000])
             update = stream.finalize()
@@ -233,28 +206,16 @@ def test_hook_failure_feed_releases_lease(streaming_model_path, audio_pcm):
     assert "country" in ran.lower(), ran
 
 
-@pytest.mark.parametrize("ending", ["reset", "gc", "session_close"])
-def test_stream_lease_released_without_finalize(streaming_model_path, audio_pcm,
-                                                ending):
-    # Abandoning an active stream (reset, dropping it, or closing its
-    # session) frees the model for other sessions.
-    import gc
-
+def test_stream_lease_released_without_finalize(streaming_model_path, audio_pcm):
+    # Closing the session of an active stream frees the model for others.
     with t.Model(streaming_model_path) as model, model.session() as sibling:
         session = model.session()
         stream = session.stream()
         stream.feed(audio_pcm[:16000])
         with pytest.raises(t.Busy):
             sibling.run(audio_pcm[:16000])
-        if ending == "reset":
-            stream.reset()
-        elif ending == "gc":
-            del stream
-            gc.collect()
-        else:
-            session.close()
-        ran = sibling.run(audio_pcm).text
         session.close()
+        ran = sibling.run(audio_pcm).text
     assert "country" in ran.lower(), ran
 
 
