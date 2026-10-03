@@ -86,7 +86,7 @@ enum Fixtures {
             "models/SenseVoiceSmall/SenseVoiceSmall-Q8_0.gguf")
     }
 
-    /// Sortformer (ASR + DIARIZE roles) + its in-repo two-speaker sample.
+    /// Sortformer (DIARIZE only) + its in-repo two-speaker sample.
     static func sortformerModelAndAudio() throws -> (model: String, pcm: [Float]) {
         guard let model = familyModel(
             "TRANSCRIBE_SMOKE_SORTFORMER_MODEL",

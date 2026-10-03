@@ -101,7 +101,7 @@ Runnable examples live in
 ## Diarization
 
 A model's `roles` say what it serves (`.asr`, `.diarize`). Diarization models
-such as Sortformer return speaker turns from a `DiarizeSession`:
+such as Sortformer (DIARIZE only) return speaker turns from a `DiarizeSession`:
 
 ```swift
 let model = try Model(path: "diar_streaming_sortformer_4spk-v2.1-F32.gguf")
@@ -112,8 +112,9 @@ for t in turns { print(t.speakerId, t.t0Ms, t.t1Ms) }
 ```
 
 Diarize runs share the model's compute lock and stream lease with sessions, and
-take a `CancellationToken` the same way. `model.capabilities` describes ASR and
-throws `TranscribeError.unsupportedRole` on a model without `.asr`.
+take a `CancellationToken` the same way. `model.capabilities` and
+`model.session()` are ASR-only and throw `TranscribeError.unsupportedRole` on a
+model without `.asr`, such as Sortformer.
 
 ## Backends
 

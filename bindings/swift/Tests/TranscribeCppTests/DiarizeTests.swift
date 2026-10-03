@@ -11,6 +11,16 @@ final class DiarizeTests: XCTestCase {
         rows.map { [$0.t0Ms, $0.t1Ms, Int64($0.speakerId)] }
     }
 
+    private func assertUnsupportedRole(_ calls: [(String, () throws -> Void)]) {
+        for (what, call) in calls {
+            XCTAssertThrowsError(try call(), what) { error in
+                guard case TranscribeError.unsupportedRole = error else {
+                    return XCTFail("\(what): expected .unsupportedRole, got \(error)")
+                }
+            }
+        }
+    }
+
     func testRoleBitsMatchTheHeader() {
         XCTAssertEqual(Roles.asr.rawValue, 1)
         XCTAssertEqual(Roles.diarize.rawValue, 2)
@@ -21,42 +31,41 @@ final class DiarizeTests: XCTestCase {
         let model = try Model(path: path)
         XCTAssertEqual(model.roles, .asr)
         XCTAssertFalse(model.accepts(DiarizeExtension.sortformer(SortformerDiarizeOptions())))
-        for (what, call) in [
+        assertUnsupportedRole([
             ("diarizeInfo", { _ = try model.diarizeInfo }),
             ("diarizeSession", { _ = try model.diarizeSession() }),
-        ] as [(String, () throws -> Void)] {
-            XCTAssertThrowsError(try call(), what) { error in
-                guard case TranscribeError.unsupportedRole = error else {
-                    return XCTFail("\(what): expected .unsupportedRole, got \(error)")
-                }
-            }
-        }
+        ])
     }
 
     func testSortformerDiarizes() throws {
         let (path, pcm) = try Fixtures.sortformerModelAndAudio()
-        let model = try Model(path: path)
-        XCTAssertEqual(model.roles, [.asr, .diarize])
+        // The golden turns are CPU numerics.
+        let model = try Model(path: path, options: ModelOptions(backend: .cpu))
+        XCTAssertEqual(model.roles, [.diarize])
         XCTAssertEqual(try model.diarizeInfo, DiarizeInfo(sampleRate: 16000, maxSpeakers: 4))
         XCTAssertTrue(model.accepts(DiarizeExtension.sortformer(SortformerDiarizeOptions())))
-        XCTAssertGreaterThan(try model.capabilities.nativeSampleRate, 0)
+        assertUnsupportedRole([
+            ("capabilities", { _ = try model.capabilities }),
+            ("session", { _ = try model.session() }),
+        ])
 
+        // (t0Ms, t1Ms, speakerId) on samples/sortformer-2spk-mix.wav. Only
+        // .lowLatency moves the turns here, so it shows the preset reaches the
+        // native run.
+        let golden: [(SortformerPreset, [[Int64]])] = [
+            (.default, [[320, 2400, 1], [7360, 9360, 1], [10240, 10640, 1],
+                        [4240, 6640, 2], [9760, 12000, 2]]),
+            (.lowLatency, [[320, 2480, 1], [7360, 9360, 1], [10240, 10640, 1],
+                           [4160, 6640, 2], [9760, 12000, 2]]),
+        ]
         let session = try model.diarizeSession()
-        // On this clip only .lowLatency moves the turns, so it shows the preset
-        // reaches the native run.
-        let preset = SortformerPreset.lowLatency
-        let rows = try session.run(
-            pcm, options: DiarizeOptions(family: .sortformer(SortformerDiarizeOptions(preset: preset))))
-        XCTAssertFalse(rows.isEmpty)
-        XCTAssertTrue(rows.allSatisfy { (1...4).contains($0.speakerId) && $0.t0Ms < $0.t1Ms })
+        for (preset, want) in golden {
+            let rows = try session.run(
+                pcm, options: DiarizeOptions(family: .sortformer(SortformerDiarizeOptions(preset: preset))))
+            XCTAssertEqual(turns(rows), want, "\(preset)")
+        }
         XCTAssertGreaterThan(session.timings.encodeMs, 0)
-        XCTAssertNotEqual(turns(rows), turns(try session.run(pcm)))
-
-        // TEMPORARY: the Sortformer ASR path (SFST on the RUN slot) is removed
-        // in a later commit; until then both roles must yield the same turns.
-        let asr = try model.session().run(
-            pcm, options: RunOptions(family: .sortformer(SortformerStreamOptions(preset: preset))))
-        XCTAssertEqual(turns(rows), turns(asr.speakerSegments))
+        XCTAssertEqual(turns(try session.run(pcm)), golden[0].1, "no extension == .default")
     }
 
     func testBadPresetAndCancellation() throws {

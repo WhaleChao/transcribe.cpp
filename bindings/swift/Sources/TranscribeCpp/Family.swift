@@ -7,7 +7,7 @@ import CTranscribe
 // `transcribe_ext` pointer is handed to the run/begin call; the library copies
 // what it needs before returning.
 
-// MARK: - Run-slot extensions (whisper, sortformer)
+// MARK: - Run-slot extensions (whisper)
 
 public struct WhisperRunOptions: Sendable {
     public var initialPrompt: String?
@@ -67,21 +67,12 @@ public enum SortformerPreset: Sendable {
     }
 }
 
-/// Sortformer diarizer options (run slot). Sortformer produces speaker
-/// segments, no text; read results via the speaker-segment accessors.
-public struct SortformerStreamOptions: Sendable {
-    public var preset: SortformerPreset?
-    public init(preset: SortformerPreset? = nil) { self.preset = preset }
-}
-
 public enum RunExtension: Sendable {
     case whisper(WhisperRunOptions)
-    case sortformer(SortformerStreamOptions)
 
     var kind: UInt32 {
         switch self {
         case .whisper: return TRANSCRIBE_EXT_KIND_WHISPER_RUN
-        case .sortformer: return TRANSCRIBE_EXT_KIND_SORTFORMER_STREAM
         }
     }
 }
@@ -109,11 +100,6 @@ func withRunExtension<R>(
             c.initial_prompt = prompt
             return try withUnsafePointer(to: &c.ext) { try body($0) }
         }
-    case .sortformer(let o):
-        var c = transcribe_sortformer_stream_ext()
-        transcribe_sortformer_stream_ext_init(&c)
-        if let v = o.preset { c.preset = v.cValue }
-        return try withUnsafePointer(to: &c.ext) { try body($0) }
     }
 }
 
