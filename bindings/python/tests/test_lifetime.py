@@ -81,8 +81,9 @@ def test_gc_order_session_keeps_model_alive(model_path, audio_pcm):
 # overlapping runs race (observed: corrupted whisper decodes on CPU,
 # command-buffer failures on Metal). The binding enforces that itself with a
 # model-wide compute lock: concurrent calls from several threads serialize
-# (they wait, never raise), so callers no longer need their own lock. The
-# deterministic, model-free lock tests live in test_compute_lock.py.
+# (they wait; only an active stream makes them raise Busy), so callers no
+# longer need their own lock. The deterministic, model-free lock and stream
+# lease tests live in test_compute_lock.py.
 
 
 def test_serial_sessions_across_threads(model_path, audio_pcm):

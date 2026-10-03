@@ -151,41 +151,49 @@ def test_stream_reset_idempotent_and_session_reusable(
 
 
 def test_second_stream_while_active_rejected(streaming_model_path, audio_pcm):
-    # One stream at a time per session: the C dispatcher rejects a begin
-    # while ACTIVE, and the binding surfaces it as InvalidArgument.
+    # One active stream per MODEL: the stream lease refuses a second begin
+    # with Busy, on the same session and on a sibling, before native code.
     with t.Model(streaming_model_path) as model, model.session() as session:
-        with session.stream() as stream:
+        with model.session() as sibling, session.stream() as stream:
             stream.feed(audio_pcm[:16000])
-            with pytest.raises(t.InvalidArgument):
+            with pytest.raises(t.Busy, match="already active"):
                 session.stream()
+            with pytest.raises(t.Busy, match="already active"):
+                sibling.stream()
+            assert stream.state == "active"
 
 
 def test_run_while_stream_active_rejected(streaming_model_path, audio_pcm):
-    # A run cannot replace an active stream's results on the SAME session:
-    # the C dispatcher rejects it, the binding surfaces InvalidArgument, and
-    # the stream stays usable afterwards.
+    # While a stream is active, the stream lease refuses run/run_batch on
+    # ANY session of the model with Busy (the C contract forbids a run
+    # between another session's feeds), the stream stays usable, and once
+    # it is finalized a sibling run goes through.
     with t.Model(streaming_model_path) as model, model.session() as session:
-        with session.stream() as stream:
+        with model.session() as sibling, session.stream() as stream:
             stream.feed(audio_pcm[:16000])
-            with pytest.raises(t.InvalidArgument):
-                session.run(audio_pcm[:16000])
-            with pytest.raises(t.InvalidArgument):
-                session.run_batch([audio_pcm[:16000]])
+            for target in (session, sibling):
+                with pytest.raises(t.Busy, match=r"before run\(\)"):
+                    target.run(audio_pcm[:16000])
+                with pytest.raises(t.Busy, match=r"before run_batch\(\)"):
+                    target.run_batch([audio_pcm[:16000]])
             for i in range(16000, len(audio_pcm), 16000):
                 stream.feed(audio_pcm[i : i + 16000])
             stream.finalize()
             assert stream.state == "finished"
             committed = stream.text().committed
+            ran = sibling.run(audio_pcm).text
     assert "country" in committed.lower(), committed
+    assert "country" in ran.lower(), ran
 
 
 def test_rejected_feed_keeps_stream_active(streaming_model_path, audio_pcm):
     # Non-finite PCM is rejected BEFORE the family hook: the feed raises
     # InvalidArgument but the native stream stays ACTIVE (only failures
-    # inside the hook move it to FAILED). The binding must release the
-    # model's compute lock on that error and leave the stream usable.
+    # inside the hook move it to FAILED). The binding releases the compute
+    # lock on that error but KEEPS the stream lease: the stream stays
+    # usable and sibling calls stay Busy until it is finalized.
     with t.Model(streaming_model_path) as model, model.session() as session:
-        with session.stream() as stream:
+        with model.session() as sibling, session.stream() as stream:
             stream.feed(audio_pcm[:16000])
             bad = list(audio_pcm[16000:32000])
             bad[100] = float("nan")
@@ -193,12 +201,61 @@ def test_rejected_feed_keeps_stream_active(streaming_model_path, audio_pcm):
                 stream.feed(bad)
             assert stream.state == "active"
             assert not model._compute_lock.locked()
+            with pytest.raises(t.Busy):
+                sibling.run(audio_pcm[:16000])
+            with pytest.raises(t.Busy):
+                sibling.stream()
+            with pytest.raises(t.Busy):
+                session.run(audio_pcm[:16000])
             for i in range(16000, len(audio_pcm), 16000):
                 stream.feed(audio_pcm[i : i + 16000])
             update = stream.finalize()
             committed = stream.text().committed
+            ran = sibling.run(audio_pcm).text  # finalize released the lease
     assert update.is_final
     assert "country" in committed.lower(), committed
+    assert "country" in ran.lower(), ran
+
+
+def test_hook_failure_feed_releases_lease(streaming_model_path, audio_pcm):
+    # A feed that fails INSIDE the family hook (here: a pending cancel the
+    # hook polls -> Aborted) leaves the stream FAILED, which is no longer
+    # active: the lease goes with it and a sibling run proceeds at once.
+    with t.Model(streaming_model_path) as model, model.session() as session:
+        with model.session() as sibling, session.stream() as stream:
+            stream.feed(audio_pcm[:16000])
+            session.cancel()
+            with pytest.raises(t.Aborted):
+                stream.feed(audio_pcm[16000:32000])
+            assert stream.state == "failed"
+            assert isinstance(stream.last_status, t.Aborted)
+            ran = sibling.run(audio_pcm).text
+    assert "country" in ran.lower(), ran
+
+
+@pytest.mark.parametrize("ending", ["reset", "gc", "session_close"])
+def test_stream_lease_released_without_finalize(streaming_model_path, audio_pcm,
+                                                ending):
+    # Abandoning an active stream (reset, dropping it, or closing its
+    # session) frees the model for other sessions.
+    import gc
+
+    with t.Model(streaming_model_path) as model, model.session() as sibling:
+        session = model.session()
+        stream = session.stream()
+        stream.feed(audio_pcm[:16000])
+        with pytest.raises(t.Busy):
+            sibling.run(audio_pcm[:16000])
+        if ending == "reset":
+            stream.reset()
+        elif ending == "gc":
+            del stream
+            gc.collect()
+        else:
+            session.close()
+        ran = sibling.run(audio_pcm).text
+        session.close()
+    assert "country" in ran.lower(), ran
 
 
 def test_stream_begin_clears_pending_cancel(streaming_model_path, audio_pcm):

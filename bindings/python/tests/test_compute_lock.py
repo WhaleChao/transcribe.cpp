@@ -1,7 +1,10 @@
-"""Model-wide compute lock: deterministic tests that need NO model.
+"""Model-wide compute lock and stream lease: deterministic tests that need NO
+model.
 
 The native library allows one compute call in flight per model across all of
-its sessions; the binding enforces that with ``Model._exclusive(kind)``. These
+its sessions, and an active stream occupies the model from begin until it
+ends. The binding enforces that with ``Model._exclusive(kind)`` and the
+model-wide stream lease (``Model._stream_lease``). These
 tests build Model/Session objects around fake handles and replace the native
 entry points the high-level code calls (``transcribe_cpp._lib.<fn>``, looked
 up at call time) with Python probes, so overlap, waiting, deferred frees and
@@ -61,7 +64,12 @@ def fake(monkeypatch):
                         lambda h: frees.append(("session", h.value)))
     monkeypatch.setattr(t._lib, "transcribe_model_free",
                         lambda h: frees.append(("model", h.value)))
-    monkeypatch.setattr(t._lib, "transcribe_stream_reset", lambda h: None)
+    resets: list = []  # session handles transcribe_stream_reset was given
+    monkeypatch.setattr(t._lib, "transcribe_stream_reset",
+                        lambda h: resets.append(h.value))
+    state = {"value": _generated.TRANSCRIBE_STREAM_ACTIVE}
+    monkeypatch.setattr(t._lib, "transcribe_stream_get_state",
+                        lambda h: state["value"])
     # The copy-out reads many native accessors; stub it to report which
     # handle it was given (proves the in-flight call kept its handle).
     monkeypatch.setattr(t.Session, "_materialize",
@@ -87,7 +95,8 @@ def fake(monkeypatch):
             made.append(s)
         return s
 
-    yield SimpleNamespace(model=model, session=session, frees=frees)
+    yield SimpleNamespace(model=model, session=session, frees=frees,
+                          resets=resets, state=state)
 
     for obj in reversed(made):
         obj.close()
@@ -441,3 +450,337 @@ def test_reentrant_compute_raises_instead_of_deadlocking(fake, monkeypatch):
     assert "error" not in box, box
     assert "re-entrant" in str(inner.get("error")), inner
     assert not m._compute_lock.locked()
+
+
+# --- stream lease ---------------------------------------------------------------
+#
+# From a successful stream begin until that stream ends, run / run_batch /
+# stream on ANY session of the model raise Busy at once (the C contract
+# forbids a run between the feeds of an active stream on another session).
+# The stream itself keeps feeding. These mirror the Rust/Swift/TS bindings.
+
+RUN_BUSY = "a stream is active on this model; finish or drop it before run()"
+BATCH_BUSY = ("a stream is active on this model; "
+              "finish or drop it before run_batch()")
+BEGIN_BUSY = "a stream is already active on this model"
+
+
+@pytest.fixture
+def native(fake, monkeypatch):
+    """Probes for the native compute entry points. ``calls`` records
+    (name, session handle) for every native compute call that ran;
+    ``status`` sets what each one returns."""
+    calls: list = []
+    status = {"run": 0, "begin": 0, "feed": 0, "finalize": 0}
+
+    def probe(name, key):
+        def fn(h, *rest):
+            calls.append((name, h.value))
+            return status[key]
+        return fn
+
+    monkeypatch.setattr(t._lib, "transcribe_run", probe("run", "run"))
+    monkeypatch.setattr(t._lib, "transcribe_run_batch", probe("run_batch", "run"))
+    monkeypatch.setattr(t._lib, "transcribe_batch_n_results", lambda h: 1)
+    monkeypatch.setattr(t._lib, "transcribe_batch_status", lambda h, i: 0)
+    monkeypatch.setattr(t._lib, "transcribe_stream_begin", probe("begin", "begin"))
+    monkeypatch.setattr(t._lib, "transcribe_stream_feed", probe("feed", "feed"))
+    monkeypatch.setattr(t._lib, "transcribe_stream_finalize",
+                        probe("finalize", "finalize"))
+    return SimpleNamespace(calls=calls, status=status)
+
+
+def _assert_busy(session, *, ran: list):
+    """Every lease-checked call on *session* raises Busy without reaching
+    native code."""
+    before = list(ran)
+    with pytest.raises(t.Busy) as ei:
+        session.run(PCM)
+    assert str(ei.value) == RUN_BUSY
+    assert ei.value.status == 0 and isinstance(ei.value, t.TranscribeError)
+    with pytest.raises(t.Busy) as ei:
+        session.run_batch([PCM])
+    assert str(ei.value) == BATCH_BUSY
+    with pytest.raises(t.Busy) as ei:
+        session.stream()
+    assert str(ei.value) == BEGIN_BUSY
+    assert ran == before, "a refused call reached native code"
+    assert not session._model._compute_lock.locked()
+
+
+def _assert_free(session):
+    """The model is free again: a run on *session* goes through."""
+    assert session.run(PCM) == ("result", session._handle.value, None)
+
+
+def test_active_stream_refuses_sibling_and_same_session_calls(fake, native):
+    m = fake.model()
+    s1, s2 = fake.session(m), fake.session(m)
+    stream = s1.stream()
+    _assert_busy(s2, ran=native.calls)  # sibling session
+    _assert_busy(s1, ran=native.calls)  # the stream's own session
+    # The lease holder itself feeds and finalizes without a busy check.
+    stream.feed(PCM)
+    stream.feed(PCM)
+    stream.finalize()
+    assert [n for n, _ in native.calls] == ["begin", "feed", "feed", "finalize"]
+    _assert_free(s2)
+    _assert_free(s1)
+
+
+def test_busy_is_exported():
+    assert "Busy" in t.__all__
+    assert t.Busy is t.errors.Busy
+    assert issubclass(t.Busy, t.TranscribeError)
+    assert not issubclass(t.Busy, t.InvalidArgument)
+
+
+def test_lease_is_per_model(fake, native):
+    s1 = fake.session(fake.model())
+    other = fake.session(fake.model())
+    s1.stream()
+    _assert_free(other)
+
+
+def test_failed_begin_takes_no_lease(fake, native):
+    m = fake.model()
+    s1, s2 = fake.session(m), fake.session(m)
+    native.status["begin"] = _generated.TRANSCRIBE_ERR_NOT_IMPLEMENTED
+    with pytest.raises(t.NotImplementedByModel):
+        s1.stream()
+    assert m._stream_lease.owner is None
+    _assert_free(s2)
+
+
+@pytest.mark.parametrize("ending", [
+    "finalize", "finalize_error", "reset", "context_exit", "gc",
+    "session_close",
+])
+def test_lease_released_when_stream_ends(fake, native, ending):
+    m = fake.model()
+    s1, s2 = fake.session(m), fake.session(m)
+    h1 = s1._handle.value
+    stream = s1.stream()
+    stream.feed(PCM)
+    _assert_busy(s2, ran=native.calls)
+
+    if ending == "finalize":
+        stream.finalize()
+    elif ending == "finalize_error":
+        native.status["finalize"] = _generated.TRANSCRIBE_ERR_BACKEND
+        with pytest.raises(t.BackendError):
+            stream.finalize()
+    elif ending == "reset":
+        stream.reset()
+        assert fake.resets == [h1]
+    elif ending == "context_exit":
+        with stream:
+            pass
+        assert fake.resets == [h1]
+    elif ending == "gc":
+        stream._cycle = stream  # only the cyclic GC can reclaim it
+        del stream
+        gc.collect()
+        assert fake.resets == [h1], "GC'd active stream was not reset once"
+    elif ending == "session_close":
+        s1.close()
+        assert fake.frees == [("session", h1)]
+
+    assert m._stream_lease.owner is None
+    _assert_free(s2)
+    if ending == "session_close":
+        # The stream outlived its session: dropping it now must not reset
+        # a freed native session.
+        del stream
+        gc.collect()
+        assert fake.resets == []
+
+
+def test_model_close_releases_lease(fake, native):
+    m = fake.model()
+    s1 = fake.session(m)
+    stream = s1.stream()
+    m.close()
+    assert m._stream_lease.owner is None
+    with pytest.raises(t.TranscribeError, match="closed"):
+        stream.feed(PCM)
+    del stream
+    gc.collect()
+    assert fake.resets == []
+
+
+def test_rejected_feed_keeps_lease_while_stream_active(fake, native):
+    # A feed rejected before the family hook (NaN/Inf -> InvalidArgument)
+    # leaves the native stream ACTIVE: the lease stays with it.
+    m = fake.model()
+    s1, s2 = fake.session(m), fake.session(m)
+    stream = s1.stream()
+    native.status["feed"] = _generated.TRANSCRIBE_ERR_INVALID_ARG
+    fake.state["value"] = _generated.TRANSCRIBE_STREAM_ACTIVE
+    with pytest.raises(t.InvalidArgument):
+        stream.feed(PCM)
+    assert not m._compute_lock.locked()
+    _assert_busy(s2, ran=native.calls)
+    _assert_busy(s1, ran=native.calls)
+    # A later valid feed and finalize then release it.
+    native.status["feed"] = 0
+    stream.feed(PCM)
+    _assert_busy(s2, ran=native.calls)
+    stream.finalize()
+    _assert_free(s2)
+
+
+def test_feed_failure_that_ends_stream_releases_lease(fake, native):
+    # A failure inside the family hook leaves the stream FAILED, which is no
+    # longer an active stream: the lease is released with the error.
+    m = fake.model()
+    s1, s2 = fake.session(m), fake.session(m)
+    stream = s1.stream()
+    native.status["feed"] = _generated.TRANSCRIBE_ERR_ABORTED
+    fake.state["value"] = _generated.TRANSCRIBE_STREAM_FAILED
+    with pytest.raises(t.Aborted):
+        stream.feed(PCM)
+    assert m._stream_lease.owner is None
+    _assert_free(s2)
+
+
+def test_ended_stream_never_clears_a_later_lease(fake, native):
+    m = fake.model()
+    sa, sb, sc = fake.session(m), fake.session(m), fake.session(m)
+    a = sa.stream()
+    a.finalize()
+    b = sb.stream()  # B now holds the lease
+    _assert_busy(sc, ran=native.calls)
+
+    # A, already ended, fails a feed (not ACTIVE), finalizes again, resets
+    # and is garbage-collected: none of that may touch B's lease.
+    native.status["feed"] = _generated.TRANSCRIBE_ERR_INVALID_ARG
+    fake.state["value"] = _generated.TRANSCRIBE_STREAM_FINISHED
+    with pytest.raises(t.InvalidArgument):
+        a.feed(PCM)
+    _assert_busy(sc, ran=native.calls)
+    a.finalize()
+    _assert_busy(sc, ran=native.calls)
+    a.reset()
+    _assert_busy(sc, ran=native.calls)
+    a._cycle = a
+    del a
+    gc.collect()
+    _assert_busy(sc, ran=native.calls)
+    sa.close()  # A's session closing leaves B's lease alone too
+    _assert_busy(sc, ran=native.calls)
+
+    native.status["feed"] = 0
+    fake.state["value"] = _generated.TRANSCRIBE_STREAM_ACTIVE
+    b.feed(PCM)
+    b.finalize()
+    _assert_free(sc)
+
+
+@pytest.mark.parametrize("begin_ok", [True, False])
+def test_busy_check_happens_after_acquiring_the_lock(fake, native, monkeypatch,
+                                                     begin_ok):
+    # A run that is already waiting for the lock when a stream begins must
+    # see that stream's lease once it gets the lock; if the begin fails,
+    # no lease was taken and the queued run proceeds.
+    m = fake.model()
+    s1, s2 = fake.session(m), fake.session(m)
+    gate = _Gate()
+    begin_status = 0 if begin_ok else _generated.TRANSCRIBE_ERR_INVALID_ARG
+
+    def begin(h, *rest):
+        gate(h)
+        return begin_status
+
+    monkeypatch.setattr(t._lib, "transcribe_stream_begin", begin)
+    try:
+        a, a_box = _in_thread(s1.stream)
+        assert gate.entered.wait(TIMEOUT)
+        spy = _LockSpy(m)
+        b, b_box = _in_thread(s2.run, PCM)
+        assert spy.waiting.wait(TIMEOUT)  # parked on the lock, before the lease
+    finally:
+        gate.release.set()
+    _join(a, "stream begin")
+    _join(b, "queued run")
+    if begin_ok:
+        assert isinstance(a_box.get("value"), t.Stream), a_box
+        assert isinstance(b_box.get("error"), t.Busy), b_box
+        assert native.calls == []  # the queued run never reached native
+        a_box["value"].reset()
+    else:
+        assert isinstance(a_box.get("error"), t.InvalidArgument), a_box
+        assert b_box.get("value") == ("result", s2._handle.value, None), b_box
+    assert not m._compute_lock.locked()
+
+
+def test_stream_gc_on_holder_thread_defers_reset(fake, native, monkeypatch):
+    # GC can finalize an abandoned stream on the thread that holds the lock.
+    # Its reset + lease release must neither deadlock nor run under the
+    # in-flight call; it runs right after, and frees the model.
+    m = fake.model()
+    s, victim_session = fake.session(m), fake.session(m)
+    hv = victim_session._handle.value
+    during: dict = {}
+
+    def run(h, *rest):
+        # Simulate a stream on victim_session that holds the lease and is
+        # dropped mid-call (a real begin here would be a re-entrant call).
+        lease = t._StreamLease(victim_session._handle)
+        m._stream_lease.owner = lease
+        victim = t.Stream(victim_session, _lease=lease)
+        victim._cycle = victim
+        del victim
+        gc.collect()  # runs Stream.__del__ on THIS thread, lock held
+        during["resets"] = list(fake.resets)
+        during["owner"] = m._stream_lease.owner
+        return 0
+
+    monkeypatch.setattr(t._lib, "transcribe_run", run)
+    th, box = _in_thread(s.run, PCM)
+    _join(th, "run with a stream GC'd on the holder thread")
+    assert "error" not in box, box
+    assert during["resets"] == [], "stream reset under the in-flight call"
+    assert during["owner"] is not None, "lease released under the lock early"
+    assert fake.resets == [hv]
+    assert m._stream_lease.owner is None
+    monkeypatch.setattr(t._lib, "transcribe_run", lambda *a: 0)
+    _assert_free(s)
+
+
+def test_session_close_releases_lease_after_free(fake, native, monkeypatch):
+    # Closing the stream's session while another call holds the lock defers
+    # the free; the lease is released only after it, so the next call never
+    # starts while the stream's native session still exists.
+    m = fake.model()
+    s1, s2 = fake.session(m), fake.session(m)
+    h1 = s1._handle.value
+    stream = s1.stream()
+    gate = _Gate()
+    seen: dict = {}
+
+    def run(h, *rest):
+        seen["frees"] = list(fake.frees)
+        return 0
+
+    monkeypatch.setattr(t._lib, "transcribe_stream_feed", gate)
+    monkeypatch.setattr(t._lib, "transcribe_run", run)
+    try:
+        a, a_box = _in_thread(stream.feed, PCM)
+        assert gate.entered.wait(TIMEOUT)
+        s1.close()  # never waits; the free is queued behind the feed
+        assert fake.frees == [] and m._stream_lease.owner is not None
+        spy = _LockSpy(m)
+        b, b_box = _in_thread(s2.run, PCM)
+        assert spy.waiting.wait(TIMEOUT)
+    finally:
+        gate.release.set()
+    _join(a, "in-flight feed")
+    _join(b, "queued run")
+    assert "error" not in a_box, a_box
+    assert b_box.get("value") == ("result", s2._handle.value, None), b_box
+    assert seen["frees"] == [("session", h1)]
+    assert m._stream_lease.owner is None
+    del stream
+    gc.collect()
+    assert fake.resets == []
