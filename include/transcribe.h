@@ -369,21 +369,22 @@ TRANSCRIBE_API const char * transcribe_version_commit(void);
  * is append-only; do not renumber existing values.
  */
 typedef enum {
-    TRANSCRIBE_ABI_MODEL_LOAD_PARAMS = 0,
-    TRANSCRIBE_ABI_SESSION_PARAMS    = 1,
-    TRANSCRIBE_ABI_RUN_PARAMS        = 2,
-    TRANSCRIBE_ABI_STREAM_PARAMS     = 3,
-    TRANSCRIBE_ABI_CAPABILITIES      = 4,
-    TRANSCRIBE_ABI_TIMINGS           = 5,
-    TRANSCRIBE_ABI_SEGMENT           = 6,
-    TRANSCRIBE_ABI_WORD              = 7,
-    TRANSCRIBE_ABI_TOKEN             = 8,
-    TRANSCRIBE_ABI_STREAM_UPDATE     = 9,
-    TRANSCRIBE_ABI_STREAM_TEXT       = 10,
-    TRANSCRIBE_ABI_SESSION_LIMITS    = 11,
-    TRANSCRIBE_ABI_EXT               = 12,
-    TRANSCRIBE_ABI_DEVICE_INFO       = 13,
-    TRANSCRIBE_ABI_SPEAKER_SEGMENT   = 14,
+    TRANSCRIBE_ABI_MODEL_LOAD_PARAMS   = 0,
+    TRANSCRIBE_ABI_SESSION_PARAMS      = 1,
+    TRANSCRIBE_ABI_RUN_PARAMS          = 2,
+    TRANSCRIBE_ABI_STREAM_PARAMS       = 3,
+    TRANSCRIBE_ABI_CAPABILITIES        = 4,
+    TRANSCRIBE_ABI_TIMINGS             = 5,
+    TRANSCRIBE_ABI_SEGMENT             = 6,
+    TRANSCRIBE_ABI_WORD                = 7,
+    TRANSCRIBE_ABI_TOKEN               = 8,
+    TRANSCRIBE_ABI_STREAM_UPDATE       = 9,
+    TRANSCRIBE_ABI_STREAM_TEXT         = 10,
+    TRANSCRIBE_ABI_SESSION_LIMITS      = 11,
+    TRANSCRIBE_ABI_EXT                 = 12,
+    TRANSCRIBE_ABI_DEVICE_INFO         = 13,
+    TRANSCRIBE_ABI_SPEAKER_SEGMENT     = 14,
+    TRANSCRIBE_ABI_BACKEND_INIT_PARAMS = 15,
 } transcribe_abi_struct;
 
 /* sizeof / alignof of the selected public struct, or 0 for an unknown id.
@@ -839,12 +840,12 @@ TRANSCRIBE_API transcribe_status transcribe_init_backends_default(void);
  * static builds the first device query / model load). A later call with a
  * different effective mask returns TRANSCRIBE_ERR_BACKEND. Call once, first.
  */
-#define TRANSCRIBE_BACKEND_MASK_CPU    (1u << 0)
-#define TRANSCRIBE_BACKEND_MASK_METAL  (1u << 1)
-#define TRANSCRIBE_BACKEND_MASK_VULKAN (1u << 2)
-#define TRANSCRIBE_BACKEND_MASK_CUDA   (1u << 3)
-#define TRANSCRIBE_BACKEND_MASK_ROCM   (1u << 4)
-#define TRANSCRIBE_BACKEND_MASK_OTHER  (1u << 31)
+#define TRANSCRIBE_BACKEND_MASK_CPU    0x00000001u
+#define TRANSCRIBE_BACKEND_MASK_METAL  0x00000002u
+#define TRANSCRIBE_BACKEND_MASK_VULKAN 0x00000004u
+#define TRANSCRIBE_BACKEND_MASK_CUDA   0x00000008u
+#define TRANSCRIBE_BACKEND_MASK_ROCM   0x00000010u
+#define TRANSCRIBE_BACKEND_MASK_OTHER  0x80000000u
 #define TRANSCRIBE_BACKEND_MASK_ALL    0xFFFFFFFFu
 
 struct transcribe_backend_init_params {

@@ -236,6 +236,8 @@ extern "C" size_t transcribe_abi_struct_size(transcribe_abi_struct which) {
             return sizeof(struct transcribe_device_info);
         case TRANSCRIBE_ABI_SPEAKER_SEGMENT:
             return sizeof(struct transcribe_speaker_segment);
+        case TRANSCRIBE_ABI_BACKEND_INIT_PARAMS:
+            return sizeof(struct transcribe_backend_init_params);
     }
     return 0;  // unknown id: "cannot verify", never a real size
 }
@@ -272,6 +274,8 @@ extern "C" size_t transcribe_abi_struct_align(transcribe_abi_struct which) {
             return alignof(struct transcribe_device_info);
         case TRANSCRIBE_ABI_SPEAKER_SEGMENT:
             return alignof(struct transcribe_speaker_segment);
+        case TRANSCRIBE_ABI_BACKEND_INIT_PARAMS:
+            return alignof(struct transcribe_backend_init_params);
     }
     return 0;
 }
@@ -1090,8 +1094,9 @@ static uint32_t env_backend_mask() {
         if (env == nullptr || env[0] == '\0') {
             return TRANSCRIBE_BACKEND_MASK_ALL;
         }
-        uint32_t     m   = 0;
-        const char * tok = env;
+        uint32_t     m       = 0;
+        bool         unknown = false;
+        const char * tok     = env;
         for (const char * p = env;; ++p) {
             if (*p != '\0' && *p != ',' && *p != ' ' && *p != '\t') {
                 continue;
@@ -1104,18 +1109,32 @@ static uint32_t env_backend_mask() {
                         bit = e.bit;
                     }
                 }
-                if (bit == 0) {
-                    transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
-                                        "TRANSCRIBE_BACKENDS: ignoring unknown backend '%.*s' "
-                                        "(expected cpu, metal, vulkan, cuda, rocm, other, all)",
-                                        static_cast<int>(std::min<size_t>(len, INT_MAX)), tok);
-                }
+                unknown = unknown || bit == 0;
                 m |= bit;
             }
             if (*p == '\0') {
                 break;
             }
             tok = p + 1;
+        }
+        // Unknown names are dropped, so a typo narrows (fail-closed). Say
+        // loudly what that left allowed.
+        if (unknown) {
+            char           allowed[64] = "all";
+            const uint32_t eff         = m | TRANSCRIBE_BACKEND_MASK_CPU;
+            if (eff != TRANSCRIBE_BACKEND_MASK_ALL) {
+                size_t off = 0;
+                for (const auto & e : k_tokens) {
+                    if (e.bit != TRANSCRIBE_BACKEND_MASK_ALL && (eff & e.bit) != 0) {
+                        off += static_cast<size_t>(
+                            std::snprintf(allowed + off, sizeof(allowed) - off, "%s%s", off ? "," : "", e.name));
+                    }
+                }
+            }
+            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                                "TRANSCRIBE_BACKENDS='%s': unknown backend name(s) ignored; it now allows: %s "
+                                "(valid: cpu, metal, vulkan, cuda, rocm, other, all)",
+                                env, allowed);
         }
         return m;
     }();
@@ -1132,8 +1151,11 @@ static bool backend_reg_filter(const char * name) noexcept {
     const uint32_t bit     = module_mask_bit(name != nullptr ? name : "");
     const bool     allowed = (effective_backend_mask(host) & bit) != 0;
     if (!allowed) {
-        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_DEBUG, "backend '%s' not registered: excluded by allowed-backend mask",
-                            name != nullptr ? name : "(null)");
+        // Callback-only, like the post-scan device summary: no stderr noise.
+        char msg[160];
+        std::snprintf(msg, sizeof(msg), "backend '%s' not registered: excluded by allowed-backend mask",
+                      name != nullptr ? name : "(null)");
+        transcribe_log_emit(TRANSCRIBE_LOG_LEVEL_DEBUG, msg);
     }
     return allowed;
 }

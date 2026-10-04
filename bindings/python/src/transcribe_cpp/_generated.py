@@ -13,7 +13,7 @@ import ctypes as _c
 # Stable digest of the ABI surface below (structs, enums, macros, layout,
 # prototypes). A native provider package echoes this back so the API
 # package can reject an ABI-mismatched provider before dlopen.
-PUBLIC_HEADER_HASH = "8c53a55291ec1597"
+PUBLIC_HEADER_HASH = "57b1af43650f195d"
 
 # === enum constants ===
 TRANSCRIBE_OK = 0
@@ -51,6 +51,7 @@ TRANSCRIBE_ABI_SESSION_LIMITS = 11
 TRANSCRIBE_ABI_EXT = 12
 TRANSCRIBE_ABI_DEVICE_INFO = 13
 TRANSCRIBE_ABI_SPEAKER_SEGMENT = 14
+TRANSCRIBE_ABI_BACKEND_INIT_PARAMS = 15
 TRANSCRIBE_LOG_LEVEL_NONE = 0
 TRANSCRIBE_LOG_LEVEL_INFO = 1
 TRANSCRIBE_LOG_LEVEL_WARN = 2
@@ -117,6 +118,12 @@ TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS = 1
 
 # === macro constants (integer object-like macros) ===
 TRANSCRIBE_BACKEND_MASK_ALL = 4294967295
+TRANSCRIBE_BACKEND_MASK_CPU = 1
+TRANSCRIBE_BACKEND_MASK_CUDA = 8
+TRANSCRIBE_BACKEND_MASK_METAL = 2
+TRANSCRIBE_BACKEND_MASK_OTHER = 2147483648
+TRANSCRIBE_BACKEND_MASK_ROCM = 16
+TRANSCRIBE_BACKEND_MASK_VULKAN = 4
 TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM = 1414746957
 TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM = 1396853584
 TRANSCRIBE_EXT_KIND_PARAKEET_STREAM = 1414744912
@@ -200,6 +207,7 @@ transcribe_whisper_chunk_trace._fields_ = [("struct_size", _c.c_uint64), ("t0_ms
 # transcribe_abi_struct id per struct (for the native size/align check).
 ABI_STRUCT_IDS = {
     'transcribe_ext': 12,
+    'transcribe_backend_init_params': 15,
     'transcribe_device_info': 13,
     'transcribe_model_load_params': 0,
     'transcribe_session_params': 1,

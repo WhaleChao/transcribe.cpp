@@ -11,7 +11,7 @@
 // Stable digest of the ABI surface (structs, enums, macros, layout,
 // prototypes), computed by the Python oracle and pinned here so a header
 // ABI change turns this binding's drift check red for conscious review.
-export const PUBLIC_HEADER_HASH = "8c53a55291ec1597";
+export const PUBLIC_HEADER_HASH = "57b1af43650f195d";
 
 // === enum constants ===
 export const TRANSCRIBE_OK = 0;
@@ -49,6 +49,7 @@ export const TRANSCRIBE_ABI_SESSION_LIMITS = 11;
 export const TRANSCRIBE_ABI_EXT = 12;
 export const TRANSCRIBE_ABI_DEVICE_INFO = 13;
 export const TRANSCRIBE_ABI_SPEAKER_SEGMENT = 14;
+export const TRANSCRIBE_ABI_BACKEND_INIT_PARAMS = 15;
 export const TRANSCRIBE_LOG_LEVEL_NONE = 0;
 export const TRANSCRIBE_LOG_LEVEL_INFO = 1;
 export const TRANSCRIBE_LOG_LEVEL_WARN = 2;
@@ -115,6 +116,12 @@ export const TRANSCRIBE_WHISPER_PROMPT_ALL_SEGMENTS = 1;
 
 // === macro constants (integer object-like macros) ===
 export const TRANSCRIBE_BACKEND_MASK_ALL = 4294967295;
+export const TRANSCRIBE_BACKEND_MASK_CPU = 1;
+export const TRANSCRIBE_BACKEND_MASK_CUDA = 8;
+export const TRANSCRIBE_BACKEND_MASK_METAL = 2;
+export const TRANSCRIBE_BACKEND_MASK_OTHER = 2147483648;
+export const TRANSCRIBE_BACKEND_MASK_ROCM = 16;
+export const TRANSCRIBE_BACKEND_MASK_VULKAN = 4;
 export const TRANSCRIBE_EXT_KIND_MOONSHINE_STREAMING_STREAM = 1414746957;
 export const TRANSCRIBE_EXT_KIND_PARAKEET_BUFFERED_STREAM = 1396853584;
 export const TRANSCRIBE_EXT_KIND_PARAKEET_STREAM = 1414744912;
@@ -151,6 +158,7 @@ export const STRUCT_LAYOUT: Record<string, StructLayout> = {
 
 export const ABI_STRUCT_IDS: Record<string, number> = {
   'transcribe_ext': 12,
+  'transcribe_backend_init_params': 15,
   'transcribe_device_info': 13,
   'transcribe_model_load_params': 0,
   'transcribe_session_params': 1,
