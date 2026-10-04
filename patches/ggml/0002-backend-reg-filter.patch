@@ -21,7 +21,7 @@ index cc3f8cd3..dd98d879 100644
      // Backend scheduler
      //
 diff --git a/src/ggml-backend-reg.cpp b/src/ggml-backend-reg.cpp
-index 1c18b82c..b2a8c193 100644
+index 1c18b82c..085ac303 100644
 --- a/src/ggml-backend-reg.cpp
 +++ b/src/ggml-backend-reg.cpp
 @@ -3,6 +3,7 @@
@@ -50,12 +50,20 @@ index 1c18b82c..b2a8c193 100644
  struct ggml_backend_reg_entry {
      ggml_backend_reg_t reg;
      dl_handle_ptr handle;
-@@ -118,58 +130,88 @@ struct ggml_backend_registry {
+@@ -118,58 +130,96 @@ struct ggml_backend_registry {
  
      ggml_backend_registry() {
  #ifdef GGML_USE_CUDA
 -        register_backend(ggml_backend_cuda_reg());
++        // HIP and MUSA builds reuse the CUDA backend; filter them under the
++        // name their dynamic module would have.
++#if defined(GGML_USE_HIP)
++        if (reg_allowed("hip")) {
++#elif defined(GGML_USE_MUSA)
++        if (reg_allowed("musa")) {
++#else
 +        if (reg_allowed("cuda")) {
++#endif
 +            register_backend(ggml_backend_cuda_reg());
 +        }
  #endif
@@ -157,7 +165,7 @@ index 1c18b82c..b2a8c193 100644
  #endif
      }
  
-@@ -478,6 +520,10 @@ static fs::path backend_filename_extension() {
+@@ -478,6 +528,10 @@ static fs::path backend_filename_extension() {
  }
  
  static ggml_backend_reg_t ggml_backend_load_best(const char * name, bool silent, const char * user_search_path) {
@@ -168,7 +176,7 @@ index 1c18b82c..b2a8c193 100644
      // enumerate all the files that match [lib]ggml-name-*.[so|dll] in the search paths
      const fs::path name_path = fs::u8path(name);
      const fs::path file_prefix = backend_filename_prefix().native() + name_path.native() + fs::u8path("-").native();
-@@ -599,7 +645,7 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
+@@ -599,7 +653,7 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
      ggml_backend_load_best("cpu", silent, dir_path);
      // check the environment variable GGML_BACKEND_PATH to load an out-of-tree backend
      const char * backend_path = std::getenv("GGML_BACKEND_PATH");
@@ -177,3 +185,29 @@ index 1c18b82c..b2a8c193 100644
          ggml_backend_load(backend_path);
      }
  }
+diff --git a/src/ggml-hip/CMakeLists.txt b/src/ggml-hip/CMakeLists.txt
+index a6a6b727..6140c29d 100644
+--- a/src/ggml-hip/CMakeLists.txt
++++ b/src/ggml-hip/CMakeLists.txt
+@@ -81,6 +81,8 @@ ggml_add_backend_library(ggml-hip
+ # TODO: do not use CUDA definitions for HIP
+ if (NOT GGML_BACKEND_DL)
+     target_compile_definitions(ggml PUBLIC GGML_USE_CUDA)
++    # transcribe.cpp: lets the registry tell HIP from CUDA (reg filter name)
++    target_compile_definitions(ggml PRIVATE GGML_USE_HIP)
+ endif()
+ 
+ add_compile_definitions(GGML_USE_HIP)
+diff --git a/src/ggml-musa/CMakeLists.txt b/src/ggml-musa/CMakeLists.txt
+index 82b754f4..8681d418 100644
+--- a/src/ggml-musa/CMakeLists.txt
++++ b/src/ggml-musa/CMakeLists.txt
+@@ -63,6 +63,8 @@ if (MUSAToolkit_FOUND)
+     # TODO: do not use CUDA definitions for MUSA
+     if (NOT GGML_BACKEND_DL)
+         target_compile_definitions(ggml PUBLIC GGML_USE_CUDA)
++        # transcribe.cpp: lets the registry tell MUSA from CUDA (reg filter name)
++        target_compile_definitions(ggml PRIVATE GGML_USE_MUSA)
+     endif()
+ 
+     add_compile_definitions(GGML_USE_MUSA)

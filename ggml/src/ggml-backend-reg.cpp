@@ -130,7 +130,15 @@ struct ggml_backend_registry {
 
     ggml_backend_registry() {
 #ifdef GGML_USE_CUDA
+        // HIP and MUSA builds reuse the CUDA backend; filter them under the
+        // name their dynamic module would have.
+#if defined(GGML_USE_HIP)
+        if (reg_allowed("hip")) {
+#elif defined(GGML_USE_MUSA)
+        if (reg_allowed("musa")) {
+#else
         if (reg_allowed("cuda")) {
+#endif
             register_backend(ggml_backend_cuda_reg());
         }
 #endif

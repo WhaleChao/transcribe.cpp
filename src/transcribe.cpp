@@ -1024,9 +1024,17 @@ static std::string path_for_c_api(const std::filesystem::path & path) {
 // compiled-in backend or opening a backend module, so a backend outside the
 // mask never runs any code. The first filter call is the moment backends get
 // registered; from then on the mask is fixed (registrations are permanent).
-static std::atomic<uint32_t> s_host_backend_mask{ TRANSCRIBE_BACKEND_MASK_ALL };
-static std::atomic<bool>     s_backend_mask_fixed{ false };
-static std::mutex            s_backend_mask_mutex;
+//
+// The host mask (low 32 bits) and the fixed flag share one atomic so that
+// fixing the mask and reading it is a single fetch_or, and setting it is a
+// CAS that fails once fixed: a concurrent _ex() and first registration can
+// never interleave into "registered under ALL, then _ex(CPU) returned OK".
+constexpr uint64_t           k_backend_mask_fixed = uint64_t{ 1 } << 32;
+static std::atomic<uint64_t> s_backend_mask_state{ TRANSCRIBE_BACKEND_MASK_ALL };
+
+static uint32_t host_backend_mask() {
+    return static_cast<uint32_t>(s_backend_mask_state.load());
+}
 
 static bool ascii_iequals(const char * a, const char * b) {
     for (; *a != '\0' && *b != '\0'; ++a, ++b) {
@@ -1035,6 +1043,17 @@ static bool ascii_iequals(const char * a, const char * b) {
         }
     }
     return *a == *b;
+}
+
+// ascii_iequals for a token that is not NUL-terminated.
+static bool ascii_iequals_n(const char * a, size_t n, const char * b) {
+    for (size_t i = 0; i < n; ++i, ++b) {
+        if (*b == '\0' ||
+            std::tolower(static_cast<unsigned char>(a[i])) != std::tolower(static_cast<unsigned char>(*b))) {
+            return false;
+        }
+    }
+    return *b == '\0';
 }
 
 struct BackendMaskName {
@@ -1062,7 +1081,9 @@ static uint32_t module_mask_bit(const char * name) {
     return TRANSCRIBE_BACKEND_MASK_OTHER;
 }
 
-// TRANSCRIBE_BACKENDS, parsed once. Unset or empty is inert (ALL).
+// TRANSCRIBE_BACKENDS, parsed once. Unset or empty is inert (ALL). Runs
+// inside the registry filter, so it must not allocate or throw: tokens are
+// matched in place.
 static uint32_t env_backend_mask() {
     static const uint32_t mask = [] {
         static const BackendMaskName k_tokens[] = {
@@ -1078,32 +1099,32 @@ static uint32_t env_backend_mask() {
         if (env == nullptr || env[0] == '\0') {
             return TRANSCRIBE_BACKEND_MASK_ALL;
         }
-        uint32_t    m = 0;
-        std::string tok;
+        uint32_t     m   = 0;
+        const char * tok = env;
         for (const char * p = env;; ++p) {
             if (*p != '\0' && *p != ',' && *p != ' ' && *p != '\t') {
-                tok.push_back(*p);
                 continue;
             }
-            if (!tok.empty()) {
+            const size_t len = static_cast<size_t>(p - tok);
+            if (len > 0) {
                 uint32_t bit = 0;
                 for (const auto & e : k_tokens) {
-                    if (ascii_iequals(tok.c_str(), e.name)) {
+                    if (ascii_iequals_n(tok, len, e.name)) {
                         bit = e.bit;
                     }
                 }
                 if (bit == 0) {
                     transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_WARN,
-                                        "TRANSCRIBE_BACKENDS: ignoring unknown backend '%s' "
+                                        "TRANSCRIBE_BACKENDS: ignoring unknown backend '%.*s' "
                                         "(expected cpu, metal, vulkan, cuda, rocm, other, all)",
-                                        tok.c_str());
+                                        static_cast<int>(std::min<size_t>(len, INT_MAX)), tok);
                 }
                 m |= bit;
-                tok.clear();
             }
             if (*p == '\0') {
                 break;
             }
+            tok = p + 1;
         }
         return m;
     }();
@@ -1115,21 +1136,17 @@ static uint32_t effective_backend_mask(uint32_t host_mask) {
 }
 
 // Called by ggml's registry, possibly from inside its function-local static
-// constructor: must not touch the registry, must not throw.
+// constructor: must not touch the registry. Nothing on this path allocates
+// or throws (log_msg formats into a stack buffer and guards the callback).
 static bool backend_reg_filter(const char * name) noexcept {
-    try {
-        s_backend_mask_fixed.store(true);
-        const uint32_t bit     = module_mask_bit(name != nullptr ? name : "");
-        const bool     allowed = (effective_backend_mask(s_host_backend_mask.load()) & bit) != 0;
-        if (!allowed) {
-            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_DEBUG,
-                                "backend '%s' not registered: excluded by allowed-backend mask",
-                                name != nullptr ? name : "(null)");
-        }
-        return allowed;
-    } catch (...) {
-        return false;
+    const uint32_t host    = static_cast<uint32_t>(s_backend_mask_state.fetch_or(k_backend_mask_fixed));
+    const uint32_t bit     = module_mask_bit(name != nullptr ? name : "");
+    const bool     allowed = (effective_backend_mask(host) & bit) != 0;
+    if (!allowed) {
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_DEBUG, "backend '%s' not registered: excluded by allowed-backend mask",
+                            name != nullptr ? name : "(null)");
     }
+    return allowed;
 }
 
 static const bool s_backend_reg_filter_installed = [] {
@@ -1138,20 +1155,21 @@ static const bool s_backend_reg_filter_installed = [] {
 }();
 
 static transcribe_status set_host_backend_mask(uint32_t mask) {
-    std::lock_guard<std::mutex> lock(s_backend_mask_mutex);
-    if (s_backend_mask_fixed.load()) {
-        const uint32_t current = effective_backend_mask(s_host_backend_mask.load());
-        const uint32_t wanted  = effective_backend_mask(mask);
-        if (current != wanted) {
-            transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
-                                "transcribe_init_backends_ex: allowed-backend mask is already fixed at 0x%08x "
-                                "(backends were registered earlier in this process); cannot change it to 0x%08x",
-                                current, wanted);
-            return TRANSCRIBE_ERR_BACKEND;
+    uint64_t state = s_backend_mask_state.load();
+    while ((state & k_backend_mask_fixed) == 0) {
+        if (s_backend_mask_state.compare_exchange_weak(state, mask)) {
+            return TRANSCRIBE_OK;
         }
-        return TRANSCRIBE_OK;
     }
-    s_host_backend_mask.store(mask);
+    const uint32_t current = effective_backend_mask(static_cast<uint32_t>(state));
+    const uint32_t wanted  = effective_backend_mask(mask);
+    if (current != wanted) {
+        transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
+                            "transcribe_init_backends_ex: allowed-backend mask is already fixed at 0x%08x "
+                            "(backends were registered earlier in this process); cannot change it to 0x%08x",
+                            current, wanted);
+        return TRANSCRIBE_ERR_BACKEND;
+    }
     return TRANSCRIBE_OK;
 }
 
@@ -1261,7 +1279,7 @@ static transcribe_status transcribe_init_backends_ex_impl(const struct transcrib
     if (ggml_backend_dev_count() == 0) {
         transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
                             "transcribe_init_backends_ex: no compute devices registered (allowed-backend mask 0x%08x)",
-                            effective_backend_mask(s_host_backend_mask.load()));
+                            effective_backend_mask(host_backend_mask()));
         return TRANSCRIBE_ERR_BACKEND;
     }
     return TRANSCRIBE_OK;
@@ -3505,7 +3523,7 @@ extern "C" transcribe_status transcribe_init_backends_ex(const struct transcribe
 
 extern "C" uint32_t transcribe_allowed_backends(void) {
     return api_guard_value("transcribe_allowed_backends", static_cast<uint32_t>(TRANSCRIBE_BACKEND_MASK_CPU),
-                           [&] { return effective_backend_mask(s_host_backend_mask.load()); });
+                           [&] { return effective_backend_mask(host_backend_mask()); });
 }
 
 extern "C" int transcribe_device_count(void) {
