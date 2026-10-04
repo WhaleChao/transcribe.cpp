@@ -104,16 +104,21 @@ struct cli_args {
     int spec_k_drafts        = -1;
 };
 
+// -o/--output: write `text` (newline-terminated) to `output` if non-null.
+// Returns false (after an error message naming `path`) on a write failure.
+bool write_output_file(std::ofstream * output, const std::string & path, const char * text);
+
 // ASR drivers (asr.cpp). Each loads the model, runs, prints, and returns the
 // process exit code.
 int run_asr_batch(const cli_args & args, std::ofstream * output);
 int run_asr_file(const cli_args & args, std::ofstream * output);
 
 // DIARIZE driver (diarize.cpp): runs on a model run_asr_file already loaded
-// and printed. Takes ownership of the model.
+// and printed. Takes ownership of the model. With -o, writes the segment lines.
 int run_diarize_file(const cli_args &           args,
                      transcribe_model *         model,
                      const std::vector<float> & pcm,
-                     double                     duration_s);
+                     double                     duration_s,
+                     std::ofstream *            output);
 
 }  // namespace transcribe_cli

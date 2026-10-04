@@ -34,6 +34,9 @@ fn abi_struct_sizes_are_live() {
         AbiStruct::Segment,
         AbiStruct::SpeakerSegment,
         AbiStruct::SessionLimits,
+        AbiStruct::DiarizeInfo,
+        AbiStruct::DiarizeSessionParams,
+        AbiStruct::DiarizeParams,
     ] {
         assert!(abi_struct_size(which) > 0, "{which:?} reported size 0");
     }

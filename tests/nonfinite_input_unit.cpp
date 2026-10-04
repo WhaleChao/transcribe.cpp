@@ -1,6 +1,6 @@
 // nonfinite_input_unit.cpp - every ASR PCM entry point rejects NaN / Inf
 // samples with INVALID_ARG before any result or stream state is modified
-// and before the family hook runs.
+// and before the family hook runs (D16a). Silence stays valid input.
 
 #include "transcribe-arch.h"
 #include "transcribe-model.h"
@@ -109,6 +109,18 @@ void test_run_rejects_nonfinite() {
     }
 }
 
+void test_run_accepts_silence() {
+    transcribe_model model;
+    model.arch = &k_arch;
+    transcribe_session s;
+    seed(s, model);
+    std::vector<float> pcm(1600, 0.0f);
+    g_run_calls = 0;
+    CHECK(transcribe_run(&s, pcm.data(), static_cast<int>(pcm.size()), nullptr) == TRANSCRIBE_OK);
+    CHECK(g_run_calls == 1);
+    CHECK(s.full_text == "fresh");
+}
+
 void test_batch_rejects_nonfinite_whole_batch() {
     transcribe_model model;
     model.arch = &k_arch;
@@ -126,6 +138,20 @@ void test_batch_rejects_nonfinite_whole_batch() {
         CHECK(g_run_batch_calls == 0);
         CHECK(prior_intact(s));
     }
+}
+
+void test_batch_accepts_silence() {
+    transcribe_model model;
+    model.arch = &k_arch;
+    transcribe_session s;
+    seed(s, model);
+    std::vector<float> a(800, 0.0f), b(800, 0.0f);
+    const float *      pcm[]       = { a.data(), b.data() };
+    const int          n_samples[] = { 800, 800 };
+    g_run_batch_calls              = 0;
+    CHECK(transcribe_run_batch(&s, pcm, n_samples, 2, nullptr) == TRANSCRIBE_OK);
+    CHECK(g_run_batch_calls == 1);
+    CHECK(transcribe_batch_n_results(&s) == 2);
 }
 
 void test_stream_feed_rejects_nonfinite() {
@@ -163,7 +189,9 @@ int main() {
     transcribe_log_set(nullptr, nullptr);
 
     test_run_rejects_nonfinite();
+    test_run_accepts_silence();
     test_batch_rejects_nonfinite_whole_batch();
+    test_batch_accepts_silence();
     test_stream_feed_rejects_nonfinite();
 
     if (g_failures != 0) {

@@ -38,7 +38,7 @@ modelTest("compute is exclusive model-wide: a sibling run waits its turn", MODEL
   }
 });
 
-modelTest("runBatch marks the session in flight with its own label", STREAMING_MODEL, async () => {
+modelTest("runBatch and finalize mark the session in flight with their own label", STREAMING_MODEL, async () => {
   const m = await TranscribeModel.load(STREAMING_MODEL);
   try {
     const s = m.createSession();
@@ -47,6 +47,16 @@ modelTest("runBatch marks the session in flight with its own label", STREAMING_M
     assert.throws(() => s.limits, /runBatch\(\).*in flight/);
     await pending;
     assert.doesNotThrow(() => s.limits);
+
+    const stream = await s.stream({ commitPolicy: "stable_prefix" });
+    await stream.feed(second());
+    const fin = stream.finalize();
+    await Promise.resolve();
+    assert.throws(() => stream.text, /feed\(\)\/finalize\(\).*in flight/);
+    assert.throws(() => s.wasAborted, /feed\(\)\/finalize\(\).*in flight/);
+    await fin;
+    assert.doesNotThrow(() => stream.text);
+    stream.reset();
     s.dispose();
   } finally {
     m.dispose();
@@ -295,6 +305,14 @@ modelTest("session dispose during an in-flight run defers the free; the result s
     assert.match(r.text, /ask not what your country/i);
     assert.ok(r.segments.length >= 1);
     assert.throws(() => s.limits, /disposed/);
+
+    const s2 = m.createSession();
+    const pb = s2.runBatch([jfk(), half()]);
+    await Promise.resolve();
+    s2.dispose();
+    const items = await pb;
+    assert.equal(items.length, 2);
+    assert.ok(items[0].ok && /ask not what your country/i.test(items[0].result.text));
   } finally {
     m.dispose();
   }
@@ -325,6 +343,14 @@ modelTest("model dispose during an in-flight run keeps the model alive for the c
   const r = await p;
   assert.match(r.text, /ask not what your country/i);
   assert.throws(() => s.limits, /disposed/);
+
+  const m2 = await TranscribeModel.load(MODEL);
+  const s2 = m2.createSession();
+  const pb = s2.runBatch([jfk()]);
+  await Promise.resolve();
+  m2.dispose();
+  const items = await pb;
+  assert.ok(items[0].ok && /ask not what your country/i.test(items[0].result.text));
 });
 
 modelTest("model dispose during an in-flight feed keeps the model alive for the call", STREAMING_MODEL, async () => {

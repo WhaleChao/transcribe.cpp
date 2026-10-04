@@ -1521,6 +1521,7 @@ if(TRANSCRIBE_BUILD_EXAMPLES)
         COMMAND ${CMAKE_COMMAND}
             -DCLI=$<TARGET_FILE:transcribe-cli>
             -DWAV=${CMAKE_SOURCE_DIR}/samples/sortformer-2spk-mix.wav
+            -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/cli-diarize-smoke
             -P ${CMAKE_CURRENT_SOURCE_DIR}/cli_diarize_smoke.cmake)
     set_tests_properties(transcribe_cli_diarize_smoke PROPERTIES
         SKIP_REGULAR_EXPRESSION "SKIP:")

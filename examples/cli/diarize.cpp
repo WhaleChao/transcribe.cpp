@@ -7,12 +7,15 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <string>
 #include <vector>
 
 int transcribe_cli::run_diarize_file(const cli_args &           args,
                                      transcribe_model *         model,
                                      const std::vector<float> & pcm,
-                                     double                     duration_s) {
+                                     double                     duration_s,
+                                     std::ofstream *            output) {
     transcribe_diarize_session_params sp;
     transcribe_diarize_session_params_init(&sp);
     sp.n_threads                         = args.n_threads;
@@ -26,15 +29,22 @@ int transcribe_cli::run_diarize_file(const cli_args &           args,
 
     st = transcribe_diarize_run(session, pcm.data(), static_cast<int>(pcm.size()), nullptr);
     std::printf("run: %s\n", transcribe_status_string(st));
+    bool output_ok = true;
     if (st == TRANSCRIBE_OK) {
         const int n = transcribe_diarize_n_segments(session);
         std::printf("speaker segments: %d\n", n);
+        std::string lines;
         for (int i = 0; i < n; ++i) {
             transcribe_speaker_segment row;
             transcribe_speaker_segment_init(&row);
             transcribe_diarize_get_segment(session, i, &row);
-            std::printf("  [%7.2f -> %7.2f] S%d\n", row.t0_ms / 1000.0, row.t1_ms / 1000.0, row.speaker_id);
+            char line[64];
+            std::snprintf(line, sizeof(line), "[%7.2f -> %7.2f] S%d\n", row.t0_ms / 1000.0, row.t1_ms / 1000.0,
+                          row.speaker_id);
+            std::printf("  %s", line);
+            lines += line;
         }
+        output_ok = write_output_file(output, args.output_path, lines.c_str());
     }
 
     transcribe_timings tm;
@@ -47,5 +57,5 @@ int transcribe_cli::run_diarize_file(const cli_args &           args,
 
     transcribe_diarize_session_free(session);
     transcribe_model_free(model);
-    return st == TRANSCRIBE_OK ? EXIT_SUCCESS : EXIT_FAILURE;
+    return st == TRANSCRIBE_OK && output_ok ? EXIT_SUCCESS : EXIT_FAILURE;
 }

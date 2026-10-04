@@ -132,6 +132,31 @@ def test_stream_use_after_reset_rejected(streaming_model_path, audio_pcm):
             stream.snapshot()
 
 
+def test_superseded_stream_cannot_touch_the_new_one(streaming_model_path, audio_pcm):
+    # A finalized Stream stays readable until the session begins another; then
+    # it is superseded: feed raises and reset is a no-op on the new stream.
+    with t.Model(streaming_model_path) as model, model.session() as session:
+        old = session.stream()
+        old.feed(audio_pcm[:16000])
+        old.finalize()
+        assert old.state == "finished"
+
+        new = session.stream()
+        new.feed(audio_pcm[:16000])
+        revision = new.revision
+        with pytest.raises(t.TranscribeError, match="superseded"):
+            old.feed(audio_pcm[16000:32000])
+        with pytest.raises(t.TranscribeError, match="superseded"):
+            old.text()
+        old.reset()
+        assert new.state == "active"
+        assert new.revision == revision
+        with model.session() as sibling, pytest.raises(t.Busy):
+            sibling.run(audio_pcm[:16000])  # the new stream still holds the lease
+        new.finalize()
+        new.reset()
+
+
 def test_stream_reset_idempotent_and_session_reusable(
         streaming_model_path, audio_pcm):
     with t.Model(streaming_model_path) as model, model.session() as session:

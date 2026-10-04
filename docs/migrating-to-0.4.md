@@ -19,7 +19,7 @@ them, and `transcribe_session_init` / `transcribe_open` return
 | `transcribe_n_speaker_segments` / `transcribe_get_speaker_segment` | `transcribe_diarize_n_segments` / `transcribe_diarize_get_segment` (same `transcribe_speaker_segment` rows) |
 | `transcribe_sortformer_stream_ext` (`SFST`, RUN slot) | `transcribe_sortformer_diarize_ext` (`SFDR`, DIARIZE_RUN slot); same preset enum |
 | `transcribe_model_supports(sortformer, TRANSCRIBE_FEATURE_DIARIZATION)` was true | false; check `transcribe_model_roles()` instead |
-| `transcribe-cli --batch ... --batch-jsonl` "speakers" for Sortformer | `transcribe-cli -m sortformer.gguf audio.wav` prints the segments |
+| `transcribe-cli --batch ... --batch-jsonl` "speakers" for Sortformer | `transcribe-cli -m sortformer.gguf audio.wav` prints the segments (`-o PATH` writes them); `--batch` is ASR-only |
 
 Segments are byte-identical to 0.3 for the same audio, preset and backend.
 Speaker-attributing ASR models (granite, moss, multitalker parakeet) are
@@ -51,8 +51,9 @@ from the role's own query (`transcribe_diarize_get_info`).
   Sortformer ASR-path extension (`SortformerStreamOptions` and equivalents)
   is removed.
 - **Rust:** `Model::capabilities()` returns `Result<Capabilities>`
-  (`Err(Error::UnsupportedRole)` on a model without ASR), and `ExtSlot`
-  gains `DiarizeRun`.
+  (`Err(Error::UnsupportedRole)` on a model without ASR). `ExtSlot` gains
+  `DiarizeRun` and `AbiStruct` gains the three diarize structs; both are now
+  `#[non_exhaustive]`, so later roles add variants without another break.
 - **Swift:** `Model.capabilities` is `get throws`.
 - **Python:** calls on one model now serialize (they used to race), and a
   run / run_batch / second stream on any session of a model with an active

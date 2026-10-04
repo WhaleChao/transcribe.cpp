@@ -51,23 +51,6 @@ std::string json_escape(const char * s) {
     return out;
 }
 
-bool write_output_file(std::ofstream * output, const std::string & path, const char * text) {
-    if (output == nullptr) {
-        return true;
-    }
-    const char * value = text != nullptr ? text : "";
-    *output << value;
-    if (value[0] == '\0' || value[std::strlen(value) - 1] != '\n') {
-        *output << '\n';
-    }
-    output->flush();
-    if (!*output) {
-        std::fprintf(stderr, "error: cannot write %s\n", path.c_str());
-        return false;
-    }
-    return true;
-}
-
 // Shared row formatter for segments_json / batch_segments_json below.
 std::string segment_row_json(const struct transcribe_segment & seg) {
     std::string out;
@@ -238,6 +221,23 @@ void apply_prompting(const cli_args & args, transcribe_run_params & rp, std::vec
 
 namespace transcribe_cli {
 
+bool write_output_file(std::ofstream * output, const std::string & path, const char * text) {
+    if (output == nullptr) {
+        return true;
+    }
+    const char * value = text != nullptr ? text : "";
+    *output << value;
+    if (value[0] == '\0' || value[std::strlen(value) - 1] != '\n') {
+        *output << '\n';
+    }
+    output->flush();
+    if (!*output) {
+        std::fprintf(stderr, "error: cannot write %s\n", path.c_str());
+        return false;
+    }
+    return true;
+}
+
 int run_asr_batch(const cli_args & args, std::ofstream * output) {
     bool output_ok = true;
     if (args.model_path.empty()) {
@@ -283,6 +283,13 @@ int run_asr_batch(const cli_args & args, std::ofstream * output) {
     const transcribe_status   load_st = transcribe_model_load_file(args.model_path.c_str(), &mp, &model);
     if (load_st != TRANSCRIBE_OK) {
         std::fprintf(stderr, "model load: %s\n", transcribe_status_string(load_st));
+        return EXIT_FAILURE;
+    }
+    if ((transcribe_model_roles(model) & TRANSCRIBE_ROLE_ASR) == 0) {
+        std::fprintf(stderr,
+                     "error: --batch is ASR-only and this model has no ASR role; "
+                     "run it on one file instead: transcribe-cli -m MODEL audio.wav\n");
+        transcribe_model_free(model);
         return EXIT_FAILURE;
     }
 
@@ -692,7 +699,7 @@ int run_asr_file(const cli_args & args, std::ofstream * output) {
 
         const uint32_t roles = transcribe_model_roles(model);
         if ((roles & TRANSCRIBE_ROLE_ASR) == 0) {
-            return transcribe_cli::run_diarize_file(args, model, pcm, duration_s);
+            return transcribe_cli::run_diarize_file(args, model, pcm, duration_s, output);
         }
 
         struct transcribe_session_params cp;

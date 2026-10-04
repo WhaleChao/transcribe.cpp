@@ -303,6 +303,7 @@ impl StreamState {
 
 /// A public ABI struct, for size/alignment introspection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum AbiStruct {
     ModelLoadParams,
     SessionParams,
@@ -319,6 +320,9 @@ pub enum AbiStruct {
     Ext,
     DeviceInfo,
     SpeakerSegment,
+    DiarizeInfo,
+    DiarizeSessionParams,
+    DiarizeParams,
 }
 
 impl AbiStruct {
@@ -340,12 +344,16 @@ impl AbiStruct {
             AbiStruct::Ext => A::TRANSCRIBE_ABI_EXT,
             AbiStruct::DeviceInfo => A::TRANSCRIBE_ABI_DEVICE_INFO,
             AbiStruct::SpeakerSegment => A::TRANSCRIBE_ABI_SPEAKER_SEGMENT,
+            AbiStruct::DiarizeInfo => A::TRANSCRIBE_ABI_DIARIZE_INFO,
+            AbiStruct::DiarizeSessionParams => A::TRANSCRIBE_ABI_DIARIZE_SESSION_PARAMS,
+            AbiStruct::DiarizeParams => A::TRANSCRIBE_ABI_DIARIZE_PARAMS,
         }
     }
 }
 
 /// The slot a family extension is pointed at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ExtSlot {
     /// `transcribe_run_params::family`.

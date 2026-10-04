@@ -1311,6 +1311,8 @@ class Session(_SessionBase):
     def __init__(self, model: Model, *, n_threads: int = 0, kv_type: KVType = "auto",
                  n_ctx: int = 0):
         self._model = model  # keep the model alive for the session's lifetime
+        # Lease of the newest Stream begun here; an older Stream is superseded.
+        self._stream_lease: Optional[_StreamLease] = None
         params = _SessionParams()
         _lib.transcribe_session_params_init(_byref(params))
         params.n_threads = n_threads
@@ -1527,6 +1529,7 @@ class Session(_SessionBase):
             # Claim the lease only now that the native begin succeeded.
             lease = _StreamLease(h)
             self._model._stream_owner = lease
+            self._stream_lease = lease
             # The C contract says everything passed to begin may be freed once
             # it returns (strings are copied into session-owned storage). The
             # Stream still pins the params structs until reset() as defense in
@@ -1665,6 +1668,8 @@ class Stream:
     def _h(self) -> ctypes.c_void_p:
         if not self._active:
             raise TranscribeError("stream has been reset")
+        if self._session._stream_lease is not self._lease:
+            raise TranscribeError("stream superseded by a newer stream on this session")
         return self._session._h
 
     def feed(self, pcm: PCMLike) -> StreamUpdate:
@@ -1738,11 +1743,13 @@ class Stream:
 
     def reset(self) -> None:
         """Return the session to idle, discarding stream state, and release
-        the model's stream lease. Idempotent."""
+        the model's stream lease. Idempotent; a no-op once a newer stream has
+        begun on the session."""
         if self._active:
             with self._session._model._exclusive("stream_reset"):
-                _lib.transcribe_stream_reset(self._session._h)
-                self._release_lease_locked()
+                if self._session._stream_lease is self._lease:
+                    _lib.transcribe_stream_reset(self._session._h)
+                    self._release_lease_locked()
             self._active = False
             self._keepalive = None
 

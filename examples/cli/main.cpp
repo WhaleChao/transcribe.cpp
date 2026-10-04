@@ -53,7 +53,7 @@ void print_usage(const char * argv0) {
                  "  --target-language ISO target language for translation (e.g. de, es, fr)\n"
                  "  -q, --quiet           suppress library log output\n"
                  "  -r, --repeat N        run N times per file (benchmark)\n"
-                 "  -o, --output PATH     write transcribed text to PATH (stdout unchanged)\n"
+                 "  -o, --output PATH     write text or speaker segments to PATH (stdout unchanged)\n"
                  "  --threads N           CPU threads (default: all cores)\n"
                  "  --n-ctx N             session context/KV cap in tokens (bounds decoder\n"
                  "                        KV memory; cannot extend the model): 0 = model\n"

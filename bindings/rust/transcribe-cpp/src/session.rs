@@ -517,6 +517,20 @@ fn attach_partial(err: Error, partial: Box<Transcript>) -> Error {
 /// [`Stream::text`], and end input with [`Stream::finalize`]. Dropping the
 /// `Stream` (without finalizing) abandons it and returns the session to idle.
 /// `Send` but not `Sync`, like the session it borrows.
+///
+/// The borrow means a session can't be freed while its stream (or any other
+/// call on it) is still in use, so no native free ever races a compute:
+///
+/// ```compile_fail,E0505
+/// use transcribe_cpp::{Model, RunOptions, StreamOptions};
+/// let model = Model::load("model.gguf").unwrap();
+/// let mut session = model.session().unwrap();
+/// let mut stream = session
+///     .stream(&RunOptions::default(), &StreamOptions::default())
+///     .unwrap();
+/// drop(session); // error[E0505]: cannot move out of `session` while borrowed
+/// stream.feed(&[0.0; 160]).unwrap();
+/// ```
 pub struct Stream<'a> {
     session: &'a mut Session,
     // True while this stream holds the model's compute lease. Set at begin,

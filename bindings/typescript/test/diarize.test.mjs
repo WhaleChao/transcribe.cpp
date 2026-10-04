@@ -2,12 +2,30 @@
 // rules a diarize run shares with Session (lock, in-flight mark, abort,
 // disposed recheck, deferred free).
 
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import { getEventListeners } from "node:events";
 import { modelTest, MODEL, SORTFORMER_MODEL, SORTFORMER_AUDIO, readWav } from "./common.mjs";
-import { TranscribeModel, Aborted, InvalidArgument, TranscribeError, UnsupportedRole } from "../dist/index.js";
+import {
+  TranscribeModel,
+  DiarizeSession,
+  Aborted,
+  InvalidArgument,
+  TranscribeError,
+  UnsupportedRole,
+} from "../dist/index.js";
 
 const mix = () => readWav(SORTFORMER_AUDIO);
+
+// Invariant 11: a role session never exposes its native handle.
+test("DiarizeSession exposes only its public surface", () => {
+  assert.deepEqual(Object.getOwnPropertyNames(DiarizeSession.prototype).sort(), [
+    "constructor",
+    "dispose",
+    "run",
+    "timings",
+  ]);
+});
 
 modelTest("an ASR-only model refuses the diarize role with UnsupportedRole", MODEL, async () => {
   const m = await TranscribeModel.load(MODEL);
