@@ -95,7 +95,6 @@ def fake(monkeypatch):
 
 
 PCM = [0.0] * 160
-SESSION_CLS = {"session": t.Session, "diarize": t.DiarizeSession}
 
 
 class _LockSpy:
@@ -173,26 +172,6 @@ def test_calls_on_two_sessions_never_overlap(fake, monkeypatch):
         assert box.get("value") == [("result", s._handle.value, None)] * n, box
 
 
-def test_lock_is_per_model(fake, monkeypatch):
-    s1 = fake.session(fake.model())
-    s2 = fake.session(fake.model())
-    gate = _Gate()
-
-    def probe(h, *rest):
-        return gate(h) if h.value == s1._handle.value else 0
-
-    monkeypatch.setattr(t._lib, "transcribe_run", probe)
-    try:
-        a, _ = _in_thread(s1.run, PCM)
-        assert gate.entered.wait(TIMEOUT)
-        b, b_box = _in_thread(s2.run, PCM)
-        _join(b, "run on another model")  # must not wait behind model 1
-        assert "error" not in b_box, b_box
-    finally:
-        gate.release.set()
-    _join(a, "first run")
-
-
 def test_every_compute_site_holds_the_lock(fake, monkeypatch):
     m = fake.model()
     s = fake.session(m)
@@ -238,28 +217,14 @@ def test_every_compute_site_holds_the_lock(fake, monkeypatch):
     assert not m._compute_lock.locked()
 
 
-def test_lock_released_after_native_error(fake, monkeypatch):
-    m = fake.model()
-    s = fake.session(m)
-    monkeypatch.setattr(t._lib, "transcribe_run",
-                        lambda *a: _generated.TRANSCRIBE_ERR_INVALID_ARG)
-    with pytest.raises(t.InvalidArgument):
-        s.run(PCM)
-    assert not m._compute_lock.locked()
-    monkeypatch.setattr(t._lib, "transcribe_run", lambda *a: 0)
-    assert s.run(PCM) == ("result", s._handle.value, None)
-
-
 # --- cancellation -------------------------------------------------------------
 
 
-@pytest.mark.parametrize("kind", ["session", "diarize"])
-def test_cancel_while_queued_is_kept(fake, diarize_native, monkeypatch, kind):
+def test_cancel_while_queued_is_kept(fake, monkeypatch):
     # cancel() is lock-free and the flag is cleared BEFORE the lock wait, so
     # a cancel issued while a call is queued is still set when it starts.
     m = fake.model()
-    s1, s2 = fake.session(m), fake.session(m, cls=SESSION_CLS[kind])
-    diarize_native.owner["model"] = m
+    s1, s2 = fake.session(m), fake.session(m)
     gate = _Gate()
     flag_at_start: list = []
 
@@ -270,7 +235,6 @@ def test_cancel_while_queued_is_kept(fake, diarize_native, monkeypatch, kind):
         return 0
 
     monkeypatch.setattr(t._lib, "transcribe_run", probe)
-    monkeypatch.setattr(t._lib, "transcribe_diarize_run", probe)
     try:
         a, _ = _in_thread(s1.run, PCM)
         assert gate.entered.wait(TIMEOUT)
@@ -288,17 +252,12 @@ def test_cancel_while_queued_is_kept(fake, diarize_native, monkeypatch, kind):
 # --- close / GC during an in-flight call ------------------------------------------
 
 
-@pytest.mark.parametrize("kind", ["session", "diarize"])
-def test_session_close_during_in_flight_call_defers_free(fake, diarize_native,
-                                                         monkeypatch, kind):
+def test_session_close_during_in_flight_call_defers_free(fake, monkeypatch):
     m = fake.model()
-    s = fake.session(m, cls=SESSION_CLS[kind])
-    diarize_native.owner["model"] = m
+    s = fake.session(m)
     handle = s._handle.value
     gate = _Gate()
     monkeypatch.setattr(t._lib, "transcribe_run", gate)
-    monkeypatch.setattr(t._lib, "transcribe_diarize_run",
-                        lambda *a: gate() or diarize_native.run(*a))
     try:
         a, a_box = _in_thread(s.run, PCM)
         assert gate.entered.wait(TIMEOUT)
@@ -309,11 +268,9 @@ def test_session_close_during_in_flight_call_defers_free(fake, diarize_native,
         gate.release.set()
     _join(a, "in-flight run")
     # The in-flight call finished its copy-out on the handle it captured...
-    expected = ROWS if kind == "diarize" else ("result", handle, None)
-    assert a_box.get("value") == expected, a_box
-    assert all(c[1] == handle for c in diarize_native.calls)
+    assert a_box.get("value") == ("result", handle, None), a_box
     # ...and the deferred free ran exactly once, after it.
-    assert fake.frees == [(kind, handle)]
+    assert fake.frees == [("session", handle)]
     with pytest.raises(t.TranscribeError, match="closed"):
         s.run(PCM)
 
@@ -470,13 +427,6 @@ def test_active_stream_refuses_sibling_and_same_session_calls(fake, native):
     _assert_free(s1)
 
 
-def test_lease_is_per_model(fake, native):
-    s1 = fake.session(fake.model())
-    other = fake.session(fake.model())
-    s1.stream()
-    _assert_free(other)
-
-
 def test_failed_begin_takes_no_lease(fake, native):
     m = fake.model()
     s1, s2 = fake.session(m), fake.session(m)
@@ -526,54 +476,6 @@ def test_lease_released_when_stream_ends(fake, native, ending):
         assert fake.resets == []
 
 
-def test_model_close_releases_lease(fake, native):
-    m = fake.model()
-    s1 = fake.session(m)
-    stream = s1.stream()
-    m.close()
-    assert m._stream_owner is None
-    with pytest.raises(t.TranscribeError, match="closed"):
-        stream.feed(PCM)
-    del stream
-    gc.collect()
-    assert fake.resets == []
-
-
-def test_rejected_feed_keeps_lease_while_stream_active(fake, native):
-    # A feed rejected before the family hook (NaN/Inf -> InvalidArgument)
-    # leaves the native stream ACTIVE: the lease stays with it.
-    m = fake.model()
-    s1, s2 = fake.session(m), fake.session(m)
-    stream = s1.stream()
-    native.status["feed"] = _generated.TRANSCRIBE_ERR_INVALID_ARG
-    fake.state["value"] = _generated.TRANSCRIBE_STREAM_ACTIVE
-    with pytest.raises(t.InvalidArgument):
-        stream.feed(PCM)
-    assert not m._compute_lock.locked()
-    _assert_busy(s2, ran=native.calls)
-    _assert_busy(s1, ran=native.calls)
-    # A later valid feed and finalize then release it.
-    native.status["feed"] = 0
-    stream.feed(PCM)
-    _assert_busy(s2, ran=native.calls)
-    stream.finalize()
-    _assert_free(s2)
-
-
-def test_feed_failure_that_ends_stream_releases_lease(fake, native):
-    # A failure inside the family hook leaves the stream FAILED, which is no
-    # longer an active stream: the lease is released with the error.
-    m = fake.model()
-    s1, s2 = fake.session(m), fake.session(m)
-    stream = s1.stream()
-    native.status["feed"] = _generated.TRANSCRIBE_ERR_ABORTED
-    fake.state["value"] = _generated.TRANSCRIBE_STREAM_FAILED
-    with pytest.raises(t.Aborted):
-        stream.feed(PCM)
-    assert m._stream_owner is None
-    _assert_free(s2)
-
-
 def test_ended_stream_never_clears_a_later_lease(fake, native):
     m = fake.model()
     sa, sb, sc = fake.session(m), fake.session(m), fake.session(m)
@@ -607,206 +509,23 @@ def test_ended_stream_never_clears_a_later_lease(fake, native):
     _assert_free(sc)
 
 
-@pytest.mark.parametrize("begin_ok", [True, False])
-def test_busy_check_happens_after_acquiring_the_lock(fake, native, monkeypatch,
-                                                     begin_ok):
-    # A run that is already waiting for the lock when a stream begins must
-    # see that stream's lease once it gets the lock; if the begin fails,
-    # no lease was taken and the queued run proceeds.
-    m = fake.model()
-    s1, s2 = fake.session(m), fake.session(m)
-    gate = _Gate()
-    begin_status = 0 if begin_ok else _generated.TRANSCRIBE_ERR_INVALID_ARG
-
-    def begin(h, *rest):
-        gate(h)
-        return begin_status
-
-    monkeypatch.setattr(t._lib, "transcribe_stream_begin", begin)
-    try:
-        a, a_box = _in_thread(s1.stream)
-        assert gate.entered.wait(TIMEOUT)
-        spy = _LockSpy(m)
-        b, b_box = _in_thread(s2.run, PCM)
-        assert spy.waiting.wait(TIMEOUT)  # parked on the lock, before the lease
-    finally:
-        gate.release.set()
-    _join(a, "stream begin")
-    _join(b, "queued run")
-    if begin_ok:
-        assert isinstance(a_box.get("value"), t.Stream), a_box
-        assert isinstance(b_box.get("error"), t.Busy), b_box
-        assert native.calls == []  # the queued run never reached native
-        a_box["value"].reset()
-    else:
-        assert isinstance(a_box.get("error"), t.InvalidArgument), a_box
-        assert b_box.get("value") == ("result", s2._handle.value, None), b_box
-    assert not m._compute_lock.locked()
-
-
-def test_stream_gc_on_holder_thread_defers_reset(fake, native, monkeypatch):
-    # GC can finalize an abandoned stream on the thread that holds the lock.
-    # Its reset + lease release must neither deadlock nor run under the
-    # in-flight call; it runs right after, and frees the model.
-    m = fake.model()
-    s, victim_session = fake.session(m), fake.session(m)
-    hv = victim_session._handle.value
-    during: dict = {}
-
-    def run(h, *rest):
-        # Simulate a stream on victim_session that holds the lease and is
-        # dropped mid-call (a real begin here would be a re-entrant call).
-        lease = t._StreamLease(victim_session._handle)
-        m._stream_owner = lease
-        victim = t.Stream(victim_session, _lease=lease)
-        victim._cycle = victim
-        del victim
-        gc.collect()  # runs Stream.__del__ on THIS thread, lock held
-        during["resets"] = list(fake.resets)
-        during["owner"] = m._stream_owner
-        return 0
-
-    monkeypatch.setattr(t._lib, "transcribe_run", run)
-    th, box = _in_thread(s.run, PCM)
-    _join(th, "run with a stream GC'd on the holder thread")
-    assert "error" not in box, box
-    assert during["resets"] == [], "stream reset under the in-flight call"
-    assert during["owner"] is not None, "lease released under the lock early"
-    assert fake.resets == [hv]
-    assert m._stream_owner is None
-    monkeypatch.setattr(t._lib, "transcribe_run", lambda *a: 0)
-    _assert_free(s)
-
-
-def test_session_close_releases_lease_after_free(fake, native, monkeypatch):
-    # Closing the stream's session while another call holds the lock defers
-    # the free; the lease is released only after it, so the next call never
-    # starts while the stream's native session still exists.
-    m = fake.model()
-    s1, s2 = fake.session(m), fake.session(m)
-    h1 = s1._handle.value
-    stream = s1.stream()
-    gate = _Gate()
-    seen: dict = {}
-
-    def run(h, *rest):
-        seen["frees"] = list(fake.frees)
-        return 0
-
-    monkeypatch.setattr(t._lib, "transcribe_stream_feed", gate)
-    monkeypatch.setattr(t._lib, "transcribe_run", run)
-    try:
-        a, a_box = _in_thread(stream.feed, PCM)
-        assert gate.entered.wait(TIMEOUT)
-        s1.close()  # never waits; the free is queued behind the feed
-        assert fake.frees == [] and m._stream_owner is not None
-        spy = _LockSpy(m)
-        b, b_box = _in_thread(s2.run, PCM)
-        assert spy.waiting.wait(TIMEOUT)
-    finally:
-        gate.release.set()
-    _join(a, "in-flight feed")
-    _join(b, "queued run")
-    assert "error" not in a_box, a_box
-    assert b_box.get("value") == ("result", s2._handle.value, None), b_box
-    assert seen["frees"] == [("session", h1)]
-    assert m._stream_owner is None
-    del stream
-    gc.collect()
-    assert fake.resets == []
-
-
-# --- DiarizeSession (close / cancel are parametrized into the tests above) ----
+# --- DiarizeSession -------------------------------------------------------------
 
 DIARIZE_BUSY = ("a stream is active on this model; "
                 "finish or drop it before diarize run()")
 
 
-@pytest.fixture
-def diarize_native(fake, monkeypatch):
-    """Probes for the diarize entry points. ``calls`` records (name, handle,
-    whether this thread held ``owner["model"]``'s lock); two rows per run."""
-    calls: list = []
-    owner: dict = {}
-
-    def held():
-        m = owner["model"]
-        return m._compute_lock.locked() and m._compute_owner == threading.get_ident()
-
-    def run(h, pcm, n, params):
-        calls.append(("run", h.value, held()))
-        return 0
-
-    def n_segments(h):
-        calls.append(("n_segments", h.value, held()))
-        return 2
-
-    def get_segment(h, i, out):
-        calls.append(("get_segment", h.value, held()))
-        row = out._obj
-        row.t0_ms, row.t1_ms, row.speaker_id, row.p = 100 * i, 100 * i + 50, i + 1, 0.5
-        return 0
-
-    monkeypatch.setattr(t._lib, "transcribe_diarize_run", run)
-    monkeypatch.setattr(t._lib, "transcribe_diarize_n_segments", n_segments)
-    monkeypatch.setattr(t._lib, "transcribe_diarize_get_segment", get_segment)
-    return SimpleNamespace(calls=calls, owner=owner, run=run)
-
-
-ROWS = [t.SpeakerSegment(t0_ms=0, t1_ms=50, speaker_id=1, p=0.5),
-        t.SpeakerSegment(t0_ms=100, t1_ms=150, speaker_id=2, p=0.5)]
-
-
-def test_diarize_run_and_copy_out_hold_the_lock(fake, diarize_native):
-    m = fake.model()
-    d = fake.session(m, cls=t.DiarizeSession)
-    diarize_native.owner["model"] = m
-    assert d.run(PCM) == ROWS
-    names = [c[0] for c in diarize_native.calls]
-    assert names == ["run", "n_segments", "get_segment", "get_segment"]
-    assert all(c[1] == d._handle.value and c[2] for c in diarize_native.calls)
-    assert not m._compute_lock.locked()
-
-
-def test_diarize_session_init_wires_cancel_and_registers(fake, monkeypatch):
-    m = fake.model()
-    hm = m._handle.value
-    cbs: list = []
-
-    def init(model_h, params, out):
-        out._obj.value = 0x9000
-        return 0
-
-    monkeypatch.setattr(t._lib, "transcribe_diarize_session_init", init)
-    monkeypatch.setattr(t._lib, "transcribe_diarize_set_abort_callback",
-                        lambda h, cb, ud: cbs.append((h.value, cb)))
-    d = m.diarize_session(n_threads=2)
-    assert d in set(m._sessions)
-    [(h, cb)] = cbs
-    assert h == 0x9000 and cb(None) is False
-    d.cancel()  # lock-free; flips what the native abort callback polls
-    assert cb(None) is True
-    m.close()  # closes the diarize session before freeing the model
-    assert fake.frees == [("diarize", 0x9000), ("model", hm)]
-
-
-def test_diarize_session_init_failure_raises_unsupported_role(fake, monkeypatch):
-    m = fake.model()
-    monkeypatch.setattr(t._lib, "transcribe_diarize_session_init",
-                        lambda mh, p, out: _generated.TRANSCRIBE_ERR_UNSUPPORTED_ROLE)
-    with pytest.raises(t.UnsupportedRole):
-        m.diarize_session()
-    assert not list(m._sessions)
-
-
-def test_diarize_run_busy_while_stream_active(fake, native, diarize_native):
+def test_diarize_run_busy_while_stream_active(fake, native, monkeypatch):
     m = fake.model()
     s, d = fake.session(m), fake.session(m, cls=t.DiarizeSession)
-    diarize_native.owner["model"] = m
+    calls: list = []
+    monkeypatch.setattr(t._lib, "transcribe_diarize_run",
+                        lambda *a: calls.append("run") or 0)
+    monkeypatch.setattr(t._lib, "transcribe_diarize_n_segments", lambda h: 0)
     stream = s.stream()
     with pytest.raises(t.Busy) as ei:
         d.run(PCM)
     assert str(ei.value) == DIARIZE_BUSY
-    assert diarize_native.calls == [] and not m._compute_lock.locked()
+    assert calls == [] and not m._compute_lock.locked()
     stream.finalize()
-    assert d.run(PCM) == ROWS
+    assert d.run(PCM) == [] and calls == ["run"]

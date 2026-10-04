@@ -47,30 +47,19 @@ def test_asr_only_model_rejects_diarize(model_path):
             model.diarize_session()
 
 
-# CPU goldens on the oracle mix, (t0_ms, t1_ms, speaker_id) grouped by speaker.
-GOLDEN = {
-    "default": [(320, 2400, 1), (7360, 9360, 1), (10240, 10640, 1),
-                (4240, 6640, 2), (9760, 12000, 2)],
-    "low_latency": [(320, 2480, 1), (7360, 9360, 1), (10240, 10640, 1),
-                    (4160, 6640, 2), (9760, 12000, 2)],
-}
-
-
-@pytest.mark.parametrize("preset", sorted(GOLDEN))
-def test_diarize_run_golden_segments(sortformer_model_path, mix_pcm, preset):
+def test_diarize_run_returns_turns_per_preset(sortformer_model_path, mix_pcm):
+    # Exact segments are pinned in C (tests/sortformer_diarize_unit.cpp); here
+    # only that rows come back well-formed and the preset reaches the run.
     with t.Model(sortformer_model_path, backend="cpu") as model:
         with model.diarize_session() as d:
-            rows = d.run(mix_pcm, family=t.SortformerDiarizeOptions(preset=preset))
+            default = d.run(mix_pcm)
+            low = d.run(mix_pcm, family=t.SortformerDiarizeOptions(preset="low_latency"))
             timings = d.timings
-    assert all(math.isnan(r.p) for r in rows)  # Sortformer has no per-turn p
-    assert _turns(rows) == GOLDEN[preset]
+    assert default
+    for r in default:
+        assert 1 <= r.speaker_id <= 4 and r.t0_ms < r.t1_ms and math.isnan(r.p)
+    assert _turns(low) != _turns(default)
     assert timings.encode_ms > 0
-
-
-def test_diarize_run_without_extension(sortformer_model_path, mix_pcm):
-    with t.Model(sortformer_model_path) as model, model.diarize_session() as d:
-        assert _turns(d.run(mix_pcm)) == _turns(
-            d.run(mix_pcm, family=t.SortformerDiarizeOptions(preset="default")))
 
 
 def test_bad_preset_rejected(sortformer_model_path, mix_pcm):

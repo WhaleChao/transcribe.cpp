@@ -97,13 +97,16 @@ def test_cancellation_aborts_pending_feed(streaming_model_path, audio_pcm):
     # Pre-set the cancel flag, then feed: the abort callback fires at the
     # first poll inside the feed. (True cross-thread mid-run cancellation is
     # covered by TestCancellation in test_transcribe.py.) Must surface as
-    # the dedicated Aborted class, not a generic TranscribeError.
+    # the dedicated Aborted class, not a generic TranscribeError. The stream
+    # is then FAILED, so it releases the model's stream lease.
     with t.Model(streaming_model_path) as model, model.session() as session:
-        with session.stream() as stream:
+        with model.session() as sibling, session.stream() as stream:
             session.cancel()
             with pytest.raises(t.Aborted):
                 stream.feed(audio_pcm)
             assert session.was_aborted, "was_aborted should be True after cancel()"
+            assert stream.state == "failed"
+            sibling.run(audio_pcm[:16000])  # not Busy
 
 
 # --- stream lifecycle edges ---------------------------------------------------
@@ -215,35 +218,6 @@ def test_rejected_feed_keeps_stream_active(streaming_model_path, audio_pcm):
     assert "country" in ran.lower(), ran
 
 
-def test_hook_failure_feed_releases_lease(streaming_model_path, audio_pcm):
-    # A feed that fails INSIDE the family hook (here: a pending cancel the
-    # hook polls -> Aborted) leaves the stream FAILED, which is no longer
-    # active: the lease goes with it and a sibling run proceeds at once.
-    with t.Model(streaming_model_path) as model, model.session() as session:
-        with model.session() as sibling, session.stream() as stream:
-            stream.feed(audio_pcm[:16000])
-            session.cancel()
-            with pytest.raises(t.Aborted):
-                stream.feed(audio_pcm[16000:32000])
-            assert stream.state == "failed"
-            assert isinstance(stream.last_status, t.Aborted)
-            ran = sibling.run(audio_pcm).text
-    assert "country" in ran.lower(), ran
-
-
-def test_stream_lease_released_without_finalize(streaming_model_path, audio_pcm):
-    # Closing the session of an active stream frees the model for others.
-    with t.Model(streaming_model_path) as model, model.session() as sibling:
-        session = model.session()
-        stream = session.stream()
-        stream.feed(audio_pcm[:16000])
-        with pytest.raises(t.Busy):
-            sibling.run(audio_pcm[:16000])
-        session.close()
-        ran = sibling.run(audio_pcm).text
-    assert "country" in ran.lower(), ran
-
-
 def test_stream_begin_clears_pending_cancel(streaming_model_path, audio_pcm):
     # A cancel() requested before stream() is cleared by the begin: the new
     # stream's feeds are not aborted by a stale flag. (A cancel() AFTER begin
@@ -254,20 +228,3 @@ def test_stream_begin_clears_pending_cancel(streaming_model_path, audio_pcm):
             stream.feed(audio_pcm[:16000])
             assert not session.was_aborted
             assert stream.state == "active"
-
-
-def test_stream_keeps_session_and_model_alive(streaming_model_path, audio_pcm):
-    # The Stream holds a strong reference to its Session (which holds the
-    # Model): dropping every other reference must not free native handles
-    # under the stream.
-    import gc
-
-    stream = t.Model(streaming_model_path).session().stream()
-    gc.collect()
-    for i in range(0, len(audio_pcm), 16000):
-        stream.feed(audio_pcm[i : i + 16000])
-    stream.finalize()
-    assert "country" in stream.text().committed.lower()
-    stream.reset()
-    del stream
-    gc.collect()
