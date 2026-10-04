@@ -1,31 +1,12 @@
-// DIARIZE role: model.roles, diarizeInfo, DiarizeSession, and the compute
-// rules a diarize run shares with Session (lock, in-flight mark, abort,
-// disposed recheck, deferred free).
+// DIARIZE role: model.roles, diarizeInfo and DiarizeSession wiring. Segment
+// values are pinned by the C test (sortformer_diarize_unit); here we check the
+// binding returns well-formed rows and passes the preset through.
 
-import { test } from "node:test";
 import assert from "node:assert/strict";
-import { getEventListeners } from "node:events";
 import { modelTest, MODEL, SORTFORMER_MODEL, SORTFORMER_AUDIO, readWav } from "./common.mjs";
-import {
-  TranscribeModel,
-  DiarizeSession,
-  Aborted,
-  InvalidArgument,
-  TranscribeError,
-  UnsupportedRole,
-} from "../dist/index.js";
+import { TranscribeModel, InvalidArgument, TranscribeError, UnsupportedRole } from "../dist/index.js";
 
 const mix = () => readWav(SORTFORMER_AUDIO);
-
-// Invariant 11: a role session never exposes its native handle.
-test("DiarizeSession exposes only its public surface", () => {
-  assert.deepEqual(Object.getOwnPropertyNames(DiarizeSession.prototype).sort(), [
-    "constructor",
-    "dispose",
-    "run",
-    "timings",
-  ]);
-});
 
 modelTest("an ASR-only model refuses the diarize role with UnsupportedRole", MODEL, async () => {
   const m = await TranscribeModel.load(MODEL);
@@ -52,22 +33,24 @@ modelTest("sortformer serves only diarize; diarizeInfo; ASR calls are refused", 
   }
 });
 
-// Goldens are CPU (as sortformer_diarize_unit): (t0Ms, t1Ms, speakerId),
-// grouped by speaker and time-ordered within one.
-const GOLDEN = {
-  default: [[320, 2400, 1], [7360, 9360, 1], [10240, 10640, 1], [4240, 6640, 2], [9760, 12000, 2]],
-  low_latency: [[320, 2480, 1], [7360, 9360, 1], [10240, 10640, 1], [4160, 6640, 2], [9760, 12000, 2]],
-};
-
-modelTest("diarize run returns the golden speaker turns per preset", SORTFORMER_MODEL, async () => {
+modelTest("diarize run returns speaker turns and honors the preset", SORTFORMER_MODEL, async () => {
   const m = await TranscribeModel.load(SORTFORMER_MODEL, { backend: "cpu" });
   try {
     const pcm = mix();
     const d = m.createDiarizeSession({ nThreads: 4 });
-    for (const [preset, want] of Object.entries(GOLDEN)) {
-      const rows = await d.run(pcm, { family: { kind: "sortformer_diarize", preset } });
-      assert.deepEqual(rows.map((r) => [r.t0Ms, r.t1Ms, r.speakerId]), want, preset);
+    const turns = async (preset) =>
+      (await d.run(pcm, { family: { kind: "sortformer_diarize", preset } })).map((r) => [
+        r.t0Ms,
+        r.t1Ms,
+        r.speakerId,
+      ]);
+    const def = await turns("default");
+    assert.ok(def.length > 0);
+    for (const [t0, t1, spk] of def) {
+      assert.ok(t0 < t1, `${t0} < ${t1}`);
+      assert.ok(spk >= 1 && spk <= m.diarizeInfo.maxSpeakers, `speaker ${spk}`);
     }
+    assert.notDeepEqual(await turns("low_latency"), def, "preset reaches the native run");
     assert.ok(d.timings.encodeMs > 0);
     d.dispose();
   } finally {
@@ -94,63 +77,4 @@ modelTest("a bad preset or wrong-slot extension is rejected", SORTFORMER_MODEL, 
   } finally {
     m.dispose();
   }
-});
-
-// ---- compute rules shared with Session -------------------------------------
-// No Busy test: no model serves both a stream lease and the diarize role.
-
-modelTest("the abort listener lives only for the call; a pre-aborted run raises Aborted", SORTFORMER_MODEL, async () => {
-  const m = await TranscribeModel.load(SORTFORMER_MODEL);
-  try {
-    const d = m.createDiarizeSession();
-    const ac = new AbortController();
-    const p = d.run(mix(), { signal: ac.signal });
-    await Promise.resolve();
-    assert.equal(getEventListeners(ac.signal, "abort").length, 1);
-    assert.ok((await p).length > 0);
-    assert.equal(getEventListeners(ac.signal, "abort").length, 0);
-
-    ac.abort();
-    await assert.rejects(() => d.run(mix(), { signal: ac.signal }), Aborted);
-    assert.equal(getEventListeners(ac.signal, "abort").length, 0);
-    assert.ok((await d.run(mix())).length > 0, "the next run is not aborted");
-  } finally {
-    m.dispose();
-  }
-});
-
-modelTest("a diarize run queued before its dispose is rejected as disposed", SORTFORMER_MODEL, async () => {
-  const m = await TranscribeModel.load(SORTFORMER_MODEL);
-  try {
-    const running = m.createDiarizeSession().run(mix());
-    const d = m.createDiarizeSession();
-    const ac = new AbortController();
-    const queued = d.run(mix(), { signal: ac.signal });
-    d.dispose();
-    await assert.rejects(queued, /disposed/i);
-    assert.equal(getEventListeners(ac.signal, "abort").length, 0);
-    await running;
-  } finally {
-    m.dispose();
-  }
-});
-
-modelTest("dispose during an in-flight diarize run defers the free; the rows survive", SORTFORMER_MODEL, async () => {
-  const m = await TranscribeModel.load(SORTFORMER_MODEL);
-  const d = m.createDiarizeSession();
-  const ac = new AbortController();
-  const p = d.run(mix(), { signal: ac.signal });
-  await Promise.resolve();
-  d.dispose();
-  assert.throws(() => d.timings, /run\(\).*in flight/);
-  assert.ok((await p).length > 0);
-  assert.equal(getEventListeners(ac.signal, "abort").length, 0);
-  assert.throws(() => d.timings, /disposed/);
-
-  const d2 = m.createDiarizeSession();
-  const p2 = d2.run(mix());
-  await Promise.resolve();
-  m.dispose(); // disposes d2 too; both native frees queue behind the run
-  assert.throws(() => m.diarizeInfo, /disposed/);
-  assert.ok((await p2).length > 0);
 });

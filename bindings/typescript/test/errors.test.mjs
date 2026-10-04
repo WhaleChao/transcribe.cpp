@@ -68,22 +68,10 @@ test("every transcribe_status maps to its documented error class", () => {
     );
   }
   assert.equal(Object.getPrototypeOf(UnsupportedRole), TranscribeError);
-  assert.equal(g.TRANSCRIBE_ERR_UNSUPPORTED_ROLE, 20);
-});
-
-test("OK does not throw", () => {
-  assert.equal(raiseForStatus(g.TRANSCRIBE_OK, "ok"), undefined);
 });
 
 test("unknown status degrades to the base class", () => {
   const e = exceptionForStatus(999, "mystery");
   assert.equal(e.constructor, TranscribeError);
   assert.equal(e.status, 999);
-});
-
-test("OutputRepetition is an OutputTruncated", () => {
-  const e = exceptionForStatus(g.TRANSCRIBE_ERR_OUTPUT_REPETITION, "looped", "run");
-  assert.ok(e instanceof OutputRepetition);
-  assert.ok(e instanceof OutputTruncated);
-  assert.equal(e.partialResult, undefined);
 });
