@@ -30,51 +30,42 @@ fn sortformer_is_diarize_only() {
 }
 
 #[test]
-fn diarize_run_matches_cpu_golden_segments() {
+fn diarize_run_returns_turns_and_applies_preset() {
     let Some((model_path, pcm)) =
-        common::smoke_sortformer_fixtures("diarize_run_matches_cpu_golden_segments")
+        common::smoke_sortformer_fixtures("diarize_run_returns_turns_and_applies_preset")
     else {
         return;
     };
-    // Goldens are recorded on CPU (tests/sortformer_diarize_unit.cpp).
+    // Exact segments are pinned in C (tests/sortformer_diarize_unit.cpp); here
+    // the binding only has to return well-formed turns and pass the preset on.
     let cpu = ModelOptions {
         backend: Backend::Cpu,
         ..Default::default()
     };
     let model = Model::load_with(&model_path, &cpu).unwrap();
+    let max_speakers = model.diarize_info().unwrap().max_speakers;
     let mut diarize = model.diarize_session().unwrap();
-    let golden_default = [
-        (320, 2400, 1),
-        (7360, 9360, 1),
-        (10240, 10640, 1),
-        (4240, 6640, 2),
-        (9760, 12000, 2),
-    ];
-    let golden_low_latency = [
-        (320, 2480, 1),
-        (7360, 9360, 1),
-        (10240, 10640, 1),
-        (4160, 6640, 2),
-        (9760, 12000, 2),
-    ];
-    for (preset, golden) in [
-        (None, &golden_default),
-        (Some(SortformerPreset::Default), &golden_default),
-        (Some(SortformerPreset::LowLatency), &golden_low_latency),
-    ] {
-        let opts = DiarizeOptions {
-            family: Some(DiarizeExtension::Sortformer(SortformerDiarizeOptions {
-                preset,
-            })),
-        };
-        let turns = diarize.run(&pcm, &opts).unwrap();
-        let rows: Vec<_> = turns
+    let rows = |turns: Vec<transcribe_cpp::SpeakerSegment>| -> Vec<_> {
+        turns
             .iter()
             .map(|s| (s.t0_ms, s.t1_ms, s.speaker_id))
-            .collect();
-        assert_eq!(rows, golden.to_vec(), "{preset:?}");
-        assert!(diarize.timings().encode_ms > 0.0);
+            .collect()
+    };
+
+    let default = rows(diarize.run(&pcm, &DiarizeOptions::default()).unwrap());
+    assert!(!default.is_empty());
+    for &(t0, t1, speaker) in &default {
+        assert!(t0 < t1, "{t0} >= {t1}");
+        assert!((1..=max_speakers).contains(&speaker), "speaker {speaker}");
     }
+    assert!(diarize.timings().encode_ms > 0.0);
+
+    let low_latency = DiarizeOptions {
+        family: Some(DiarizeExtension::Sortformer(SortformerDiarizeOptions {
+            preset: Some(SortformerPreset::LowLatency),
+        })),
+    };
+    assert_ne!(rows(diarize.run(&pcm, &low_latency).unwrap()), default);
 }
 
 #[test]

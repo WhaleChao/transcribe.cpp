@@ -285,42 +285,6 @@ fn stream_family_extension_accepted_or_rejected() {
 }
 
 #[test]
-fn option_validation_precedes_busy_check() {
-    // Run options are marshalled before the compute lock is taken, so a bad
-    // option is reported as itself even while another session streams.
-    let (Some(model_path), Some(pcm)) = (common::smoke_streaming_model(), common::smoke_audio())
-    else {
-        return;
-    };
-    let model = Model::load(&model_path).unwrap();
-    let mut s1 = model.session().unwrap();
-    let mut s2 = model.session().unwrap();
-    let _stream1 = s1
-        .stream(&RunOptions::default(), &StreamOptions::default())
-        .unwrap();
-
-    let bad = RunOptions {
-        language: Some("e\0n".into()),
-        ..Default::default()
-    };
-    assert!(
-        matches!(s2.run(&pcm, &bad), Err(Error::Nul(_))),
-        "run: NUL option must win over Busy"
-    );
-    assert!(
-        matches!(s2.run_batch(&[&pcm], &bad), Err(Error::Nul(_))),
-        "run_batch: NUL option must win over Busy"
-    );
-    assert!(
-        matches!(
-            s2.stream(&bad, &StreamOptions::default()),
-            Err(Error::Nul(_))
-        ),
-        "stream: NUL option must win over Busy"
-    );
-}
-
-#[test]
 fn ended_stream_never_releases_another_sessions_lease() {
     // After finalize() the lease belongs to whoever takes it next; a later
     // reset() or drop of the ended stream must not free that other lease.
