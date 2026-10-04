@@ -1,19 +1,15 @@
 diff --git a/include/ggml-backend.h b/include/ggml-backend.h
-index cc3f8cd3..dd98d879 100644
+index cc3f8cd3..764ffe84 100644
 --- a/include/ggml-backend.h
 +++ b/include/ggml-backend.h
-@@ -259,6 +259,17 @@ extern "C" {
+@@ -259,6 +259,13 @@ extern "C" {
      GGML_API void               ggml_backend_load_all(void);
      GGML_API void               ggml_backend_load_all_from_path(const char * dir_path);
  
-+    // Registration filter (transcribe.cpp downstream patch). When set, the
-+    // registry consults it before registering each compiled-in backend and
-+    // before opening any dynamic backend module, keyed by the lower-case
-+    // module name ("cpu", "blas", "metal", "vulkan", "cuda", "hip", ...;
-+    // "external" for GGML_BACKEND_PATH). A rejected backend's code never runs:
-+    // no reg function call, no dlopen. Explicit ggml_backend_load(path) calls
-+    // are not filtered. Install before the first registry access so the
-+    // compiled-in backends see it. NULL (the default) allows everything.
++    // Registration filter (transcribe.cpp patch): consulted with the module
++    // name ("cpu", "vulkan", "hip", ...; "external" for GGML_BACKEND_PATH)
++    // before registering a compiled-in backend or opening a module. Install
++    // before first registry access. ggml_backend_load(path) is not filtered.
 +    typedef bool (*ggml_backend_reg_filter_t)(const char * name);
 +    GGML_API void               ggml_backend_set_reg_filter(ggml_backend_reg_filter_t filter);
 +
@@ -21,7 +17,7 @@ index cc3f8cd3..dd98d879 100644
      // Backend scheduler
      //
 diff --git a/src/ggml-backend-reg.cpp b/src/ggml-backend-reg.cpp
-index 1c18b82c..085ac303 100644
+index 1c18b82c..7c076862 100644
 --- a/src/ggml-backend-reg.cpp
 +++ b/src/ggml-backend-reg.cpp
 @@ -3,6 +3,7 @@
@@ -50,13 +46,12 @@ index 1c18b82c..085ac303 100644
  struct ggml_backend_reg_entry {
      ggml_backend_reg_t reg;
      dl_handle_ptr handle;
-@@ -118,58 +130,96 @@ struct ggml_backend_registry {
+@@ -118,58 +130,95 @@ struct ggml_backend_registry {
  
      ggml_backend_registry() {
  #ifdef GGML_USE_CUDA
 -        register_backend(ggml_backend_cuda_reg());
-+        // HIP and MUSA builds reuse the CUDA backend; filter them under the
-+        // name their dynamic module would have.
++        // HIP/MUSA reuse the CUDA backend; filter under their module name.
 +#if defined(GGML_USE_HIP)
 +        if (reg_allowed("hip")) {
 +#elif defined(GGML_USE_MUSA)
@@ -165,7 +160,7 @@ index 1c18b82c..085ac303 100644
  #endif
      }
  
-@@ -478,6 +528,10 @@ static fs::path backend_filename_extension() {
+@@ -478,6 +527,10 @@ static fs::path backend_filename_extension() {
  }
  
  static ggml_backend_reg_t ggml_backend_load_best(const char * name, bool silent, const char * user_search_path) {
@@ -176,7 +171,7 @@ index 1c18b82c..085ac303 100644
      // enumerate all the files that match [lib]ggml-name-*.[so|dll] in the search paths
      const fs::path name_path = fs::u8path(name);
      const fs::path file_prefix = backend_filename_prefix().native() + name_path.native() + fs::u8path("-").native();
-@@ -599,7 +653,7 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
+@@ -599,7 +652,7 @@ void ggml_backend_load_all_from_path(const char * dir_path) {
      ggml_backend_load_best("cpu", silent, dir_path);
      // check the environment variable GGML_BACKEND_PATH to load an out-of-tree backend
      const char * backend_path = std::getenv("GGML_BACKEND_PATH");
@@ -186,27 +181,27 @@ index 1c18b82c..085ac303 100644
      }
  }
 diff --git a/src/ggml-hip/CMakeLists.txt b/src/ggml-hip/CMakeLists.txt
-index a6a6b727..6140c29d 100644
+index a6a6b727..9b963dd5 100644
 --- a/src/ggml-hip/CMakeLists.txt
 +++ b/src/ggml-hip/CMakeLists.txt
 @@ -81,6 +81,8 @@ ggml_add_backend_library(ggml-hip
  # TODO: do not use CUDA definitions for HIP
  if (NOT GGML_BACKEND_DL)
      target_compile_definitions(ggml PUBLIC GGML_USE_CUDA)
-+    # transcribe.cpp: lets the registry tell HIP from CUDA (reg filter name)
++    # transcribe.cpp: reg filter name
 +    target_compile_definitions(ggml PRIVATE GGML_USE_HIP)
  endif()
  
  add_compile_definitions(GGML_USE_HIP)
 diff --git a/src/ggml-musa/CMakeLists.txt b/src/ggml-musa/CMakeLists.txt
-index 82b754f4..8681d418 100644
+index 82b754f4..6cb178eb 100644
 --- a/src/ggml-musa/CMakeLists.txt
 +++ b/src/ggml-musa/CMakeLists.txt
 @@ -63,6 +63,8 @@ if (MUSAToolkit_FOUND)
      # TODO: do not use CUDA definitions for MUSA
      if (NOT GGML_BACKEND_DL)
          target_compile_definitions(ggml PUBLIC GGML_USE_CUDA)
-+        # transcribe.cpp: lets the registry tell MUSA from CUDA (reg filter name)
++        # transcribe.cpp: reg filter name
 +        target_compile_definitions(ggml PRIVATE GGML_USE_MUSA)
      endif()
  

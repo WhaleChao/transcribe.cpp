@@ -826,44 +826,18 @@ TRANSCRIBE_API transcribe_status transcribe_init_backends(const char * artifact_
 TRANSCRIBE_API transcribe_status transcribe_init_backends_default(void);
 
 /*
- * Restricting which backends may initialize.
+ * Allowed-backend mask. Registering a GPU backend runs driver code, so a
+ * broken driver can crash the process before any model loads. A backend
+ * outside the mask is never registered: its module is never opened and its
+ * registration function never runs. CPU (incl. BLAS/ZenDNN) is always
+ * allowed; OTHER covers backends without a bit (SYCL, OpenCL, RPC, ...).
  *
- * Registering a GPU backend runs driver code: Vulkan creates an instance
- * (loading every installed ICD), Metal opens the system device, CUDA
- * initializes the driver. A broken driver can crash or hang the process
- * right there, before any model is loaded. A host that isolates inference
- * in a worker process can recover from that only if the replacement worker
- * never runs the failing backend's code at all — hiding its devices after
- * registration is too late.
+ * TRANSCRIBE_BACKENDS=cpu,vulkan,... (also metal, cuda, rocm, other, all)
+ * can only narrow the mask, and applies even if _ex() is never called.
  *
- * transcribe_init_backends_ex() takes an allow-mask of backend kinds. A
- * backend outside the mask is never registered: its module is never opened
- * (dynamic-backend builds) and its registration function is never called
- * (static builds). The CPU backend is always allowed, so a mask of 0 or
- * TRANSCRIBE_BACKEND_MASK_CPU means "CPU only".
- *
- *   CPU     the CPU backend plus host-memory accelerators (BLAS, ZenDNN)
- *   METAL   Apple Metal
- *   VULKAN  Vulkan
- *   CUDA    NVIDIA CUDA
- *   ROCM    AMD ROCm / HIP
- *   OTHER   every backend without a dedicated bit in the running library
- *           (SYCL, OpenCL, RPC, ..., and an out-of-tree module named by
- *           GGML_BACKEND_PATH)
- *
- * The TRANSCRIBE_BACKENDS environment variable can only narrow the mask
- * further: a comma-separated list of cpu, metal, vulkan, cuda, rocm, other,
- * all (case-insensitive; e.g. TRANSCRIBE_BACKENDS=cpu forces CPU-only
- * regardless of what the host passes). Unset or empty means "all". Unknown
- * names are logged and ignored. It applies to every way backends get
- * registered, including hosts that never call this function.
- *
- * The mask is FIXED the first time the library registers backends — that
- * is, the first transcribe_init_backends*() call or, in static builds, the
- * first call that enumerates devices or loads a model. Backends cannot be
- * unregistered, so a later call asking for a different effective mask
- * returns TRANSCRIBE_ERR_BACKEND without changing anything. Call this once,
- * first, per process.
+ * The mask is fixed at first backend registration (first init call, or in
+ * static builds the first device query / model load). A later call with a
+ * different effective mask returns TRANSCRIBE_ERR_BACKEND. Call once, first.
  */
 #define TRANSCRIBE_BACKEND_MASK_CPU    (1u << 0)
 #define TRANSCRIBE_BACKEND_MASK_METAL  (1u << 1)
@@ -875,32 +849,21 @@ TRANSCRIBE_API transcribe_status transcribe_init_backends_default(void);
 
 struct transcribe_backend_init_params {
     uint64_t     struct_size;      /* sizeof(*this); set by _init() */
-    const char * artifact_dir;     /* NULL: package-local default, as
-                                      transcribe_init_backends_default() */
-    uint32_t     allowed_backends; /* TRANSCRIBE_BACKEND_MASK_* bits;
-                                      _init() sets ..._MASK_ALL */
+    const char * artifact_dir;     /* NULL: package-local default */
+    uint32_t     allowed_backends; /* TRANSCRIBE_BACKEND_MASK_*; default ALL */
 };
 
 TRANSCRIBE_API void transcribe_backend_init_params_init(struct transcribe_backend_init_params * p);
 
 /*
- * Fix the allowed-backend mask (see above), then load backend modules as
- * transcribe_init_backends(artifact_dir) or, with artifact_dir NULL,
- * transcribe_init_backends_default() would. NULL params means all defaults.
- *
- * Returns the statuses of those calls, plus:
- *   TRANSCRIBE_ERR_BAD_STRUCT_SIZE  params fails the struct-size check.
- *   TRANSCRIBE_ERR_BACKEND          the mask was already fixed to a different
- *                                   effective value, or no compute device is
- *                                   registered afterwards.
+ * Fix the mask, then behave as transcribe_init_backends(artifact_dir), or
+ * _default() when artifact_dir is NULL. NULL params means all defaults.
+ * Also returns TRANSCRIBE_ERR_BACKEND if the mask was already fixed to a
+ * different value or no device is registered afterwards.
  */
 TRANSCRIBE_API transcribe_status transcribe_init_backends_ex(const struct transcribe_backend_init_params * params);
 
-/*
- * The effective allowed-backend mask: the host's mask (ALL until
- * transcribe_init_backends_ex() sets one) narrowed by TRANSCRIBE_BACKENDS,
- * with the CPU bit always set.
- */
+/* The effective mask: the host's (ALL until _ex()) narrowed by the env. */
 TRANSCRIBE_API uint32_t transcribe_allowed_backends(void);
 
 /*

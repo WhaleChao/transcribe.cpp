@@ -157,16 +157,10 @@ pub fn init_backends_default() -> Result<()> {
     check(status, "init_backends_default")
 }
 
-/// A set of backend kinds allowed to register in this process.
-///
-/// Registering a GPU backend runs driver code (Vulkan instance creation loads
-/// every installed driver; Metal and CUDA initialize theirs), so a broken
-/// driver can crash or hang the process before any model loads. A backend
-/// outside the mask is never registered: its module is never opened and its
-/// registration function never runs. The CPU backend is always allowed.
-///
-/// The `TRANSCRIBE_BACKENDS` environment variable (e.g. `cpu` or
-/// `cpu,vulkan`) can only narrow the mask further.
+/// Backend kinds allowed to register in this process. A backend outside the
+/// mask never runs any code, so a broken GPU driver can be kept out of a
+/// worker entirely. CPU is always allowed; `TRANSCRIBE_BACKENDS` can only
+/// narrow the mask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BackendMask(u32);
@@ -187,11 +181,8 @@ impl BackendMask {
     /// Everything. The default.
     pub const ALL: BackendMask = BackendMask(sys::TRANSCRIBE_BACKEND_MASK_ALL);
 
-    /// The smallest mask that can satisfy a model-load `backend` request:
-    /// [`Backend::Auto`] needs everything, [`Backend::Cpu`] /
-    /// [`Backend::CpuAccel`] only the CPU, and an explicit GPU backend only
-    /// itself (plus the implied CPU). A worker process that serves exactly
-    /// one request kind passes this to [`init_backends_with`].
+    /// The smallest mask that can serve a model-load `backend` request
+    /// ([`Backend::Auto`] needs everything).
     pub const fn for_backend(backend: Backend) -> BackendMask {
         match backend {
             Backend::Auto => BackendMask::ALL,
@@ -243,15 +234,10 @@ impl std::ops::BitOrAssign for BackendMask {
     }
 }
 
-/// [`init_backends`] / [`init_backends_default`] with an allowed-backend mask.
-/// `dir` is the backend module directory, or `None` for the package-local
-/// default.
-///
-/// The mask is fixed the first time backends register in this process (this
-/// call, or in static builds the first device query or model load). Call it
-/// first, once per process: a later call asking for a different effective
-/// mask errors with [`crate::Error::Backend`]. Registration is permanent, so a
-/// worker that must avoid a backend needs a fresh process.
+/// [`init_backends`] / [`init_backends_default`] (`dir` = `None`) with an
+/// allowed-backend mask. The mask is fixed at first backend registration;
+/// call this first, once per process. A later call with a different
+/// effective mask returns [`crate::Error::Backend`].
 ///
 /// ```no_run
 /// use transcribe_cpp::{init_backends_with, Backend, BackendMask};
@@ -272,9 +258,8 @@ pub fn init_backends_with(dir: Option<impl AsRef<Path>>, allowed: BackendMask) -
     check(status, "init_backends_with")
 }
 
-/// The effective allowed-backend mask: the mask passed to
-/// [`init_backends_with`] (everything until then), narrowed by
-/// `TRANSCRIBE_BACKENDS`, with the CPU always included.
+/// The effective mask: [`init_backends_with`]'s (ALL until then) narrowed
+/// by `TRANSCRIBE_BACKENDS`.
 pub fn allowed_backends() -> BackendMask {
     BackendMask(unsafe { sys::transcribe_allowed_backends() })
 }

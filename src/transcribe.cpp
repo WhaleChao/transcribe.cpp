@@ -1019,16 +1019,9 @@ static std::string path_for_c_api(const std::filesystem::path & path) {
 }
 #endif
 
-// Allowed-backend mask. ggml consults backend_reg_filter (installed at static
-// init, before anything can touch ggml's registry) before registering a
-// compiled-in backend or opening a backend module, so a backend outside the
-// mask never runs any code. The first filter call is the moment backends get
-// registered; from then on the mask is fixed (registrations are permanent).
-//
-// The host mask (low 32 bits) and the fixed flag share one atomic so that
-// fixing the mask and reading it is a single fetch_or, and setting it is a
-// CAS that fails once fixed: a concurrent _ex() and first registration can
-// never interleave into "registered under ALL, then _ex(CPU) returned OK".
+// Allowed-backend mask, enforced by backend_reg_filter (installed at static
+// init). The first filter call fixes the mask. Mask (low 32 bits) and fixed
+// flag share one atomic so _ex() cannot race the first registration.
 constexpr uint64_t           k_backend_mask_fixed = uint64_t{ 1 } << 32;
 static std::atomic<uint64_t> s_backend_mask_state{ TRANSCRIBE_BACKEND_MASK_ALL };
 
@@ -1061,8 +1054,7 @@ struct BackendMaskName {
     uint32_t     bit;
 };
 
-// ggml module names (the [lib]ggml-<name> stem) -> mask bit. Anything not
-// listed, including "external" (GGML_BACKEND_PATH), is OTHER.
+// ggml module name -> mask bit; unlisted (incl. "external") is OTHER.
 static uint32_t module_mask_bit(const char * name) {
     static const BackendMaskName k_modules[] = {
         { "cpu",    TRANSCRIBE_BACKEND_MASK_CPU    },
@@ -1081,9 +1073,8 @@ static uint32_t module_mask_bit(const char * name) {
     return TRANSCRIBE_BACKEND_MASK_OTHER;
 }
 
-// TRANSCRIBE_BACKENDS, parsed once. Unset or empty is inert (ALL). Runs
-// inside the registry filter, so it must not allocate or throw: tokens are
-// matched in place.
+// TRANSCRIBE_BACKENDS, parsed once; unset/empty is ALL. Runs inside the
+// registry filter, so it must not allocate or throw.
 static uint32_t env_backend_mask() {
     static const uint32_t mask = [] {
         static const BackendMaskName k_tokens[] = {
@@ -1135,9 +1126,7 @@ static uint32_t effective_backend_mask(uint32_t host_mask) {
     return (host_mask & env_backend_mask()) | TRANSCRIBE_BACKEND_MASK_CPU;
 }
 
-// Called by ggml's registry, possibly from inside its function-local static
-// constructor: must not touch the registry. Nothing on this path allocates
-// or throws (log_msg formats into a stack buffer and guards the callback).
+// Called from inside ggml's registry: must not touch the registry or throw.
 static bool backend_reg_filter(const char * name) noexcept {
     const uint32_t host    = static_cast<uint32_t>(s_backend_mask_state.fetch_or(k_backend_mask_fixed));
     const uint32_t bit     = module_mask_bit(name != nullptr ? name : "");
@@ -1274,8 +1263,7 @@ static transcribe_status transcribe_init_backends_ex_impl(const struct transcrib
     if (st != TRANSCRIBE_OK) {
         return st;
     }
-    // Static builds register compiled-in backends lazily on first registry
-    // access; force it here so the mask is fixed by this call, as documented.
+    // Static builds register lazily; force it so this call fixes the mask.
     if (ggml_backend_dev_count() == 0) {
         transcribe::log_msg(TRANSCRIBE_LOG_LEVEL_ERROR,
                             "transcribe_init_backends_ex: no compute devices registered (allowed-backend mask 0x%08x)",

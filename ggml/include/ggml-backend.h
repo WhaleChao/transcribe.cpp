@@ -259,14 +259,10 @@ extern "C" {
     GGML_API void               ggml_backend_load_all(void);
     GGML_API void               ggml_backend_load_all_from_path(const char * dir_path);
 
-    // Registration filter (transcribe.cpp downstream patch). When set, the
-    // registry consults it before registering each compiled-in backend and
-    // before opening any dynamic backend module, keyed by the lower-case
-    // module name ("cpu", "blas", "metal", "vulkan", "cuda", "hip", ...;
-    // "external" for GGML_BACKEND_PATH). A rejected backend's code never runs:
-    // no reg function call, no dlopen. Explicit ggml_backend_load(path) calls
-    // are not filtered. Install before the first registry access so the
-    // compiled-in backends see it. NULL (the default) allows everything.
+    // Registration filter (transcribe.cpp patch): consulted with the module
+    // name ("cpu", "vulkan", "hip", ...; "external" for GGML_BACKEND_PATH)
+    // before registering a compiled-in backend or opening a module. Install
+    // before first registry access. ggml_backend_load(path) is not filtered.
     typedef bool (*ggml_backend_reg_filter_t)(const char * name);
     GGML_API void               ggml_backend_set_reg_filter(ggml_backend_reg_filter_t filter);
 

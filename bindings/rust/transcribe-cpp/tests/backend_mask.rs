@@ -11,7 +11,10 @@ use transcribe_cpp::{
 fn for_backend_is_minimal() {
     assert_eq!(BackendMask::for_backend(Backend::Auto), BackendMask::ALL);
     assert_eq!(BackendMask::for_backend(Backend::Cpu), BackendMask::CPU);
-    assert_eq!(BackendMask::for_backend(Backend::CpuAccel), BackendMask::CPU);
+    assert_eq!(
+        BackendMask::for_backend(Backend::CpuAccel),
+        BackendMask::CPU
+    );
     assert_eq!(
         BackendMask::for_backend(Backend::Vulkan),
         BackendMask::VULKAN | BackendMask::CPU

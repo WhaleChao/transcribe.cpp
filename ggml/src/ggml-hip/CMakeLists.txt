@@ -81,7 +81,7 @@ ggml_add_backend_library(ggml-hip
 # TODO: do not use CUDA definitions for HIP
 if (NOT GGML_BACKEND_DL)
     target_compile_definitions(ggml PUBLIC GGML_USE_CUDA)
-    # transcribe.cpp: lets the registry tell HIP from CUDA (reg filter name)
+    # transcribe.cpp: reg filter name
     target_compile_definitions(ggml PRIVATE GGML_USE_HIP)
 endif()
 
