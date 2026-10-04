@@ -1,6 +1,7 @@
 // role_resolve_unit.cpp - load-time role validation (transcribe::resolve_roles) and the public role API (transcribe_model_roles, UNSUPPORTED_ROLE).
 
 #include "transcribe-arch.h"
+#include "transcribe-diarize.h"
 #include "transcribe-model.h"
 #include "transcribe.h"
 
@@ -45,39 +46,54 @@ const transcribe::Arch k_no_role_arch = {
     /* .name             = */ "fake_no_role",
 };
 
-transcribe_status resolve(const transcribe::Arch & arch, uint32_t roles, uint32_t * out_roles) {
-    transcribe_model model;
-    model.arch                 = &arch;
-    model.roles                = roles;
-    const transcribe_status st = transcribe::resolve_roles(&model);
-    *out_roles                 = model.roles;
-    return st;
+// Diarize-only: a diarize ops table and no ASR hooks. resolve_roles only
+// checks the table is present, so an empty one suffices.
+const transcribe::DiarizeOps k_diarize_ops = {};
+
+transcribe::Arch make_diarize_arch() {
+    transcribe::Arch a = {};
+    a.name             = "fake_diarize";
+    a.diarize          = &k_diarize_ops;
+    return a;
 }
 
-void test_asr_default_and_explicit() {
-    uint32_t roles = 0;
-    CHECK(resolve(k_asr_arch, 0, &roles) == TRANSCRIBE_OK);
-    CHECK(roles == TRANSCRIBE_ROLE_ASR);
-    CHECK(resolve(k_asr_arch, TRANSCRIBE_ROLE_ASR, &roles) == TRANSCRIBE_OK);
-    CHECK(roles == TRANSCRIBE_ROLE_ASR);
-}
+const transcribe::Arch k_diarize_arch = make_diarize_arch();
 
-void test_no_role_rejected() {
-    uint32_t roles = 0;
-    CHECK(resolve(k_no_role_arch, 0, &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
-    CHECK(resolve(k_half_asr_arch, 0, &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
-}
+void test_resolve_roles() {
+    constexpr uint32_t ASR = TRANSCRIBE_ROLE_ASR;
+    constexpr uint32_t DIA = TRANSCRIBE_ROLE_DIARIZE;
 
-void test_unbacked_role_rejected() {
-    uint32_t roles = 0;
-    CHECK(resolve(k_half_asr_arch, TRANSCRIBE_ROLE_ASR, &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
-    CHECK(resolve(k_asr_arch, TRANSCRIBE_ROLE_DIARIZE, &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
-    CHECK(resolve(k_asr_arch, TRANSCRIBE_ROLE_ASR | TRANSCRIBE_ROLE_DIARIZE, &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
-}
+    struct Case {
+        const transcribe::Arch * arch;
+        uint32_t                 roles_in;
+        transcribe_status        want;
+        uint32_t                 roles_out;  // checked on OK only
+    };
 
-void test_unknown_bit_rejected() {
-    uint32_t roles = 0;
-    CHECK(resolve(k_asr_arch, TRANSCRIBE_ROLE_ASR | (1u << 31), &roles) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
+    const Case cases[] = {
+        { &k_asr_arch,      0,                TRANSCRIBE_OK,                  ASR }, // defaults to ASR
+        { &k_asr_arch,      ASR,              TRANSCRIBE_OK,                  ASR },
+        { &k_diarize_arch,  DIA,              TRANSCRIBE_OK,                  DIA },
+        { &k_diarize_arch,  0,                TRANSCRIBE_ERR_NOT_IMPLEMENTED, 0   }, // no default for non-ASR roles
+        { &k_no_role_arch,  0,                TRANSCRIBE_ERR_NOT_IMPLEMENTED, 0   },
+        { &k_half_asr_arch, 0,                TRANSCRIBE_ERR_NOT_IMPLEMENTED, 0   },
+        { &k_half_asr_arch, ASR,              TRANSCRIBE_ERR_NOT_IMPLEMENTED, 0   },
+        { &k_asr_arch,      DIA,              TRANSCRIBE_ERR_NOT_IMPLEMENTED, 0   },
+        { &k_asr_arch,      ASR | DIA,        TRANSCRIBE_ERR_NOT_IMPLEMENTED, 0   },
+        { &k_diarize_arch,  ASR | DIA,        TRANSCRIBE_ERR_NOT_IMPLEMENTED, 0   },
+        { &k_asr_arch,      ASR | (1u << 31), TRANSCRIBE_ERR_NOT_IMPLEMENTED, 0   }, // unknown bit
+        { nullptr,          0,                TRANSCRIBE_ERR_NOT_IMPLEMENTED, 0   },
+    };
+    for (const Case & c : cases) {
+        transcribe_model model;
+        model.arch                 = c.arch;
+        model.roles                = c.roles_in;
+        const transcribe_status st = transcribe::resolve_roles(&model);
+        CHECK(st == c.want);
+        if (st == TRANSCRIBE_OK) {
+            CHECK(model.roles == c.roles_out);
+        }
+    }
 }
 
 // ASR entry points refuse a model that does not serve ASR, before
@@ -108,22 +124,12 @@ void test_asr_entry_points_check_role() {
     CHECK(transcribe_model_roles(&model) == TRANSCRIBE_ROLE_ASR);
 }
 
-void test_null_model() {
-    CHECK(transcribe::resolve_roles(nullptr) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
-    transcribe_model model;
-    CHECK(transcribe::resolve_roles(&model) == TRANSCRIBE_ERR_NOT_IMPLEMENTED);
-}
-
 }  // namespace
 
 int main() {
     transcribe_log_set(nullptr, nullptr);  // the rejections log at ERROR
 
-    test_asr_default_and_explicit();
-    test_no_role_rejected();
-    test_unbacked_role_rejected();
-    test_unknown_bit_rejected();
-    test_null_model();
+    test_resolve_roles();
     test_asr_entry_points_check_role();
 
     if (g_failures != 0) {

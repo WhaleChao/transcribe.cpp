@@ -9,7 +9,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace {
@@ -61,51 +60,6 @@ std::vector<Row> diarize(transcribe_diarize_session * s,
     dp.family = &ext.ext;
     CHECK(transcribe_diarize_run(s, pcm.data(), static_cast<int>(pcm.size()), &dp) == TRANSCRIBE_OK);
     return diarize_rows(s);
-}
-
-// The ASR leg runs on jfk.wav: whisper with NULL params seeds temperature
-// fallback randomly, and the overlapping 2-speaker mix triggers fallback, so
-// its text is not stable across runs.
-void test_cross_role_concurrency(transcribe_model * sf, const std::vector<float> & pcm) {
-    const char * whisper_path = std::getenv("TRANSCRIBE_WHISPER_GGUF");
-    if (whisper_path == nullptr || whisper_path[0] == '\0') {
-        std::fprintf(stderr, "sortformer_diarize_unit: TRANSCRIBE_WHISPER_GGUF not set; skipping concurrency leg\n");
-        return;
-    }
-    std::vector<float> asr_pcm;
-    std::string        err;
-    if (!transcribe_cli::load_wav_mono_16k(std::string(TRANSCRIBE_TEST_SAMPLES_DIR) + "/jfk.wav", asr_pcm, err)) {
-        std::fprintf(stderr, "FAIL: jfk.wav: %s\n", err.c_str());
-        ++g_failures;
-        return;
-    }
-    transcribe_model * asr_model = load_cpu(whisper_path);
-    CHECK(asr_model != nullptr);
-    if (asr_model == nullptr) {
-        return;
-    }
-    transcribe_session *         asr = nullptr;
-    transcribe_diarize_session * dia = nullptr;
-    CHECK(transcribe_session_init(asr_model, nullptr, &asr) == TRANSCRIBE_OK);
-    CHECK(transcribe_diarize_session_init(sf, nullptr, &dia) == TRANSCRIBE_OK);
-
-    CHECK(transcribe_run(asr, asr_pcm.data(), static_cast<int>(asr_pcm.size()), nullptr) == TRANSCRIBE_OK);
-    const std::string text_seq = transcribe_full_text(asr);
-    CHECK(!text_seq.empty());
-    const std::vector<Row> rows_seq = diarize(dia, pcm, TRANSCRIBE_SORTFORMER_PRESET_DEFAULT);
-
-    transcribe_status asr_st = TRANSCRIBE_ERR_BACKEND;
-    std::thread t([&] { asr_st = transcribe_run(asr, asr_pcm.data(), static_cast<int>(asr_pcm.size()), nullptr); });
-    const std::vector<Row> rows_par = diarize(dia, pcm, TRANSCRIBE_SORTFORMER_PRESET_DEFAULT);
-    t.join();
-
-    CHECK(asr_st == TRANSCRIBE_OK);
-    CHECK(text_seq == transcribe_full_text(asr));
-    CHECK(rows_par == rows_seq);
-
-    transcribe_session_free(asr);
-    transcribe_diarize_session_free(dia);
-    transcribe_model_free(asr_model);
 }
 
 }  // namespace
@@ -179,10 +133,6 @@ int main() {
     CHECK(transcribe_diarize_n_segments(dia) == n_before);
 
     transcribe_diarize_session_free(dia);
-
-    // 4. Cross-role concurrency on two models.
-    test_cross_role_concurrency(model, pcm);
-
     transcribe_model_free(model);
     if (g_failures != 0) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);

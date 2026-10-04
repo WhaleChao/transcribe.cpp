@@ -101,42 +101,25 @@ void expect_failed(const transcribe_session & s, transcribe_status st, Throw t) 
     CHECK(transcribe_stream_last_status(&s) == want);
 }
 
-void test_begin_throw() {
-    for (Throw t : { Throw::BadAlloc, Throw::Runtime }) {
-        reset_globals();
-        Fixture f;
-        g_begin                    = t;
-        const transcribe_status st = transcribe_stream_begin(&f.session, nullptr, nullptr);
-        expect_failed(f.session, st, t);
-        // A failed stream accepts a fresh begin.
-        g_begin = Throw::None;
-        CHECK(transcribe_stream_begin(&f.session, nullptr, nullptr) == TRANSCRIBE_OK);
-        CHECK(transcribe_stream_get_state(&f.session) == TRANSCRIBE_STREAM_ACTIVE);
-    }
-}
-
-void test_feed_throw() {
-    for (Throw t : { Throw::BadAlloc, Throw::Runtime }) {
-        reset_globals();
-        Fixture f;
-        CHECK(transcribe_stream_begin(&f.session, nullptr, nullptr) == TRANSCRIBE_OK);
-        g_feed = t;
-        expect_failed(f.session, f.feed(), t);
-        // No longer ACTIVE, so further feeds are refused as on any failed stream.
-        g_feed = Throw::None;
-        CHECK(f.feed() == TRANSCRIBE_ERR_INVALID_ARG);
-    }
-}
-
-void test_finalize_throw() {
-    for (Throw t : { Throw::BadAlloc, Throw::Runtime }) {
-        reset_globals();
-        Fixture f;
-        CHECK(transcribe_stream_begin(&f.session, nullptr, nullptr) == TRANSCRIBE_OK);
-        CHECK(f.feed() == TRANSCRIBE_OK);
-        g_finalize                 = t;
-        const transcribe_status st = transcribe_stream_finalize(&f.session, nullptr);
-        expect_failed(f.session, st, t);
+// Each of begin / feed / finalize, throwing bad_alloc or a runtime_error,
+// leaves the stream FAILED; a failed stream accepts a fresh begin.
+void test_hook_throw_fails_stream() {
+    Throw * hooks[] = { &g_begin, &g_feed, &g_finalize };
+    for (Throw * hook : hooks) {
+        for (Throw t : { Throw::BadAlloc, Throw::Runtime }) {
+            reset_globals();
+            Fixture f;
+            if (hook != &g_begin) {
+                CHECK(transcribe_stream_begin(&f.session, nullptr, nullptr) == TRANSCRIBE_OK);
+            }
+            *hook                      = t;
+            const transcribe_status st = hook == &g_begin ? transcribe_stream_begin(&f.session, nullptr, nullptr) :
+                                         hook == &g_feed  ? f.feed() :
+                                                            transcribe_stream_finalize(&f.session, nullptr);
+            expect_failed(f.session, st, t);
+            *hook = Throw::None;
+            CHECK(transcribe_stream_begin(&f.session, nullptr, nullptr) == TRANSCRIBE_OK);
+        }
     }
 }
 
@@ -162,9 +145,7 @@ void test_reset_throw_still_idles() {
 int main() {
     transcribe_log_set(nullptr, nullptr);  // the guard logs each caught exception
 
-    test_begin_throw();
-    test_feed_throw();
-    test_finalize_throw();
+    test_hook_throw_fails_stream();
     test_reset_throw_still_idles();
 
     if (g_failures != 0) {

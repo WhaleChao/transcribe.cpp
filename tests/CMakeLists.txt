@@ -1323,8 +1323,8 @@ if(TRANSCRIBE_BUILD_REAL_MODEL_TESTS)
     set_tests_properties(transcribe_qwen3_asr_e2e_smoke PROPERTIES
         SKIP_RETURN_CODE 77)
 
-    # Sortformer on the DIARIZE role: golden segments per preset, pre-clear
-    # rejection, and (with TRANSCRIBE_WHISPER_GGUF) cross-role concurrency.
+    # Sortformer on the DIARIZE role: golden segments per preset and pre-clear
+    # rejection.
     # Gated by TRANSCRIBE_SORTFORMER_GGUF (RC 77 skip).
     add_executable(transcribe_sortformer_diarize_unit
         sortformer_diarize_unit.cpp)

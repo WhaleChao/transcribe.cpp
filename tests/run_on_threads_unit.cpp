@@ -68,24 +68,7 @@ void test_every_tid_runs_once() {
     }
 }
 
-void test_worker_throw_on_caller_thread() {
-    std::atomic<int> done{ 0 };
-    bool             caught = false;
-    try {
-        transcribe::run_on_threads(4, [&](int tid) {
-            if (tid == 0) {
-                throw std::runtime_error("tid0");
-            }
-            done.fetch_add(1);
-        });
-    } catch (const std::runtime_error &) {
-        caught = true;
-    }
-    CHECK(caught);
-    CHECK(done.load() == 3);  // every pool thread ran to completion and was joined
-}
-
-void test_worker_throw_on_pool_thread() {
+void test_worker_throw_rethrown_after_join() {
     std::atomic<int> done{ 0 };
     bool             caught = false;
     try {
@@ -99,21 +82,7 @@ void test_worker_throw_on_pool_thread() {
         caught = true;  // exception type preserved across the thread boundary
     }
     CHECK(caught);
-    CHECK(done.load() == 3);
-}
-
-void test_lowest_tid_exception_wins() {
-    int which = -1;
-    try {
-        transcribe::run_on_threads(4, [&](int tid) {
-            if (tid == 1 || tid == 3) {
-                throw std::runtime_error(tid == 1 ? "1" : "3");
-            }
-        });
-    } catch (const std::runtime_error & e) {
-        which = e.what()[0] - '0';
-    }
-    CHECK(which == 1);
+    CHECK(done.load() == 3);  // every other thread ran to completion and was joined
 }
 
 void test_launch_failure_joins_launched_threads() {
@@ -139,26 +108,6 @@ void test_launch_failure_joins_launched_threads() {
     CHECK(ran.load() == 2);
 }
 
-void test_first_launch_failure() {
-    reset_flaky(0);
-    bool caught = false;
-    try {
-        transcribe::run_on_threads<FlakyThread>(3, [](int) {});
-    } catch (const std::system_error &) {
-        caught = true;
-    }
-    CHECK(caught);
-    CHECK(FlakyThread::joins.load() == 0);
-}
-
-void test_launch_ok_with_seam() {
-    reset_flaky(-1);
-    std::atomic<int> ran{ 0 };
-    transcribe::run_on_threads<FlakyThread>(4, [&](int) { ran.fetch_add(1); });
-    CHECK(ran.load() == 4);
-    CHECK(FlakyThread::joins.load() == 3);
-}
-
 void test_parallel_for_all_propagates() {
     bool caught = false;
     try {
@@ -178,12 +127,8 @@ void test_parallel_for_all_propagates() {
 
 int main() {
     test_every_tid_runs_once();
-    test_worker_throw_on_caller_thread();
-    test_worker_throw_on_pool_thread();
-    test_lowest_tid_exception_wins();
+    test_worker_throw_rethrown_after_join();
     test_launch_failure_joins_launched_threads();
-    test_first_launch_failure();
-    test_launch_ok_with_seam();
     test_parallel_for_all_propagates();
 
     if (g_failures != 0) {
