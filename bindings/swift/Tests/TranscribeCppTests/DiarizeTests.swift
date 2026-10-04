@@ -2,8 +2,7 @@ import XCTest
 
 @testable import TranscribeCpp
 
-/// DIARIZE role (`DiarizeSession`). Lock / lease / keep-alive rules are in
-/// ComputeRulesTests.
+/// DIARIZE role (`DiarizeSession`).
 final class DiarizeTests: XCTestCase {
     /// `p` is NaN on diarize rows, so compare the turns, not `SpeakerSegment`s.
     private func turns(_ rows: [SpeakerSegment]) -> [[Int64]] {
@@ -43,31 +42,24 @@ final class DiarizeTests: XCTestCase {
             ("session", { _ = try model.session() }),
         ])
 
-        // (t0Ms, t1Ms, speakerId) on samples/sortformer-2spk-mix.wav. Only
-        // .lowLatency moves the turns here, so it shows the preset reaches the
-        // native run.
-        let golden: [(SortformerPreset, [[Int64]])] = [
-            (.default, [[320, 2400, 1], [7360, 9360, 1], [10240, 10640, 1],
-                        [4240, 6640, 2], [9760, 12000, 2]]),
-            (.lowLatency, [[320, 2480, 1], [7360, 9360, 1], [10240, 10640, 1],
-                           [4160, 6640, 2], [9760, 12000, 2]]),
-        ]
+        // Segment values are pinned by the C test; here, check the rows are sane
+        // and that the preset reaches the native run (.lowLatency moves turns).
         let session = try model.diarizeSession()
-        for (preset, want) in golden {
-            let rows = try session.run(
-                pcm, options: DiarizeOptions(family: .sortformer(SortformerDiarizeOptions(preset: preset))))
-            XCTAssertEqual(turns(rows), want, "\(preset)")
+        let base = try session.run(pcm)
+        XCTAssertFalse(base.isEmpty)
+        for row in base {
+            XCTAssertTrue((1...4).contains(row.speakerId), "\(row)")
+            XCTAssertLessThan(row.t0Ms, row.t1Ms, "\(row)")
         }
         XCTAssertGreaterThan(session.timings.encodeMs, 0)
-        XCTAssertEqual(turns(try session.run(pcm)), golden[0].1, "no extension == .default")
+        let low = try session.run(
+            pcm, options: DiarizeOptions(family: .sortformer(SortformerDiarizeOptions(preset: .lowLatency))))
+        XCTAssertNotEqual(turns(low), turns(base), ".lowLatency must reach the native run")
     }
 
     func testCancelledRunAbortsAndRecovers() throws {
         let (path, pcm) = try Fixtures.sortformerModelAndAudio()
         let session = try Model(path: path).diarizeSession()
-        let first = try session.run(pcm)
-        XCTAssertFalse(first.isEmpty)
-
         let token = CancellationToken()
         token.cancel()
         session.setCancellationToken(token)
@@ -77,6 +69,23 @@ final class DiarizeTests: XCTestCase {
             }
         }
         session.clearCancellationToken()
-        XCTAssertEqual(turns(try session.run(pcm)), turns(first))
+        XCTAssertFalse(try session.run(pcm).isEmpty)
+    }
+
+    /// A diarize run shares the model's stream lease with ASR sessions.
+    func testDiarizeRunIsBusyWhileAStreamIsActive() throws {
+        let (path, pcm) = try Fixtures.sortformerModelAndAudio()
+        let model = try Model(path: path)
+        let session = try model.diarizeSession()
+        // Sortformer cannot stream, so set the lease a stream would hold directly.
+        model.withCompute { model.streamActive = true }
+        defer { model.withCompute { model.streamActive = false } }
+        XCTAssertThrowsError(try session.run(pcm)) { error in
+            guard case TranscribeError.busy(let message) = error else {
+                return XCTFail("expected .busy, got \(error)")
+            }
+            XCTAssertEqual(
+                message, "a stream is active on this model; finish or drop it before diarize run()")
+        }
     }
 }

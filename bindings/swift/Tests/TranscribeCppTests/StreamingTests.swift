@@ -131,4 +131,31 @@ final class StreamingTests: XCTestCase {
             _ = stream1
         }
     }
+
+    /// While a stream is active, run / runBatch / stream on any session of the
+    /// model throw `.busy`.
+    func testActiveStreamRefusesSiblingCompute() throws {
+        let (path, pcm) = try Fixtures.streamingModelAndAudio()
+        let model = try Model(path: path)
+        let s1 = try model.session()
+        let s2 = try model.session()
+        let active = try s1.stream()
+        _ = try active.feed(Array(pcm.prefix(1600)))
+
+        let cases: [(String, () throws -> Void)] = [
+            ("a stream is active on this model; finish or drop it before run()", { _ = try s2.run(pcm) }),
+            ("a stream is active on this model; finish or drop it before runBatch()",
+             { _ = try s2.runBatch([pcm]) }),
+            ("a stream is already active on this model", { _ = try s2.stream() }),
+        ]
+        for (message, call) in cases {
+            XCTAssertThrowsError(try call()) { error in
+                guard case TranscribeError.busy(let got) = error else {
+                    return XCTFail("expected .busy, got \(error)")
+                }
+                XCTAssertEqual(got, message)
+            }
+        }
+        active.reset()
+    }
 }

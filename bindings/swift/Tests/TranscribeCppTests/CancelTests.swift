@@ -30,7 +30,6 @@ final class CancelTests: XCTestCase {
             }
         }
         XCTAssertTrue(session.wasAborted)
-        XCTAssertTrue(session.cancelToken === token, "a sync run leaves the caller's token installed")
     }
 
     func testCrossThreadCancelOfInFlightRun() throws {

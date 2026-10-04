@@ -49,8 +49,7 @@ final class NoModelTests: XCTestCase {
         XCTAssertNil(TranscribeError.inputTooLong("").partial)
     }
 
-    // Every native status maps to its case. `label` has no `default`, so a new
-    // TranscribeError case does not compile until this table is updated; the
+    // Every native status maps to its case (compared by case name); the
     // "unknown status" check below flags a newly appended C status.
     func testEveryStatusMapsToItsCase() {
         let expected: [Int32: String] = [
@@ -66,31 +65,11 @@ final class NoModelTests: XCTestCase {
         for raw in 1...20 {
             let status = transcribe_status(rawValue: UInt32(raw))
             XCTAssertNotEqual(Transcribe.statusString(Int32(raw)), "unknown status", "status \(raw)")
-            XCTAssertEqual(label(TranscribeError.make(status)), expected[Int32(raw)], "status \(raw)")
+            let name = String(describing: TranscribeError.make(status)).prefix { $0 != "(" }
+            XCTAssertEqual(String(name), expected[Int32(raw)], "status \(raw)")
         }
         XCTAssertEqual(Transcribe.statusString(21), "unknown status",
                        "a new status was appended; map it in TranscribeError.make")
-    }
-
-    private func label(_ error: TranscribeError) -> String {
-        switch error {
-        case .invalidArgument: return "invalidArgument"
-        case .notImplemented: return "notImplemented"
-        case .modelFileNotFound: return "modelFileNotFound"
-        case .modelLoad: return "modelLoad"
-        case .outOfMemory: return "outOfMemory"
-        case .backend: return "backend"
-        case .unsupported: return "unsupported"
-        case .badStructSize: return "badStructSize"
-        case .inputTooLong: return "inputTooLong"
-        case .aborted: return "aborted"
-        case .outputTruncated: return "outputTruncated"
-        case .outputRepetition: return "outputRepetition"
-        case .unsupportedRole: return "unsupportedRole"
-        case .versionMismatch: return "versionMismatch"
-        case .busy: return "busy"
-        case .other: return "other"
-        }
     }
 
     func testAtLeastOneDevice() {
